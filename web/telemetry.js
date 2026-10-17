@@ -29,6 +29,8 @@ export function init(isEnabled) {
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") flush(true);
   });
+  // pagehide also fires on navigation and on iOS Safari, where visibilitychange is unreliable.
+  window.addEventListener("pagehide", () => flush(true));
   window.addEventListener("online", () => flush());
   flush();
 }
@@ -87,17 +89,11 @@ export async function flush(leaving = false) {
   }
   if (flushing) return;
   flushing = true;
-  try {
-    for (const b of batches()) {
-      const r = await send(b, false);
-      // 400/409/413/422: the database rejected these rows; retrying won't help.
-      // Anything else (404 before the schema exists, 401, 429, 5xx) is retried later.
-      if (r.ok || [400, 409, 413, 422].includes(r.status)) drop(b.rows);
-      else break;  // server trouble: keep the rows and retry on the next flush
-    }
-  } catch (e) {
-    // offline or blocked by an extension: retry later
-  } finally {
-    flushing = false;
-  }
+  // All batches at once: a page closed mid-way then loses as little as possible.
+  await Promise.all(batches().map((b) => send(b, false).then((r) => {
+    // 400/409/413/422: the database rejected these rows; retrying won't help.
+    // Anything else (404 before the schema exists, 401, 429, 5xx) is retried later.
+    if (r.ok || [400, 409, 413, 422].includes(r.status)) drop(b.rows);
+  }).catch(() => { /* offline or blocked by an extension: retry later */ })));
+  flushing = false;
 }

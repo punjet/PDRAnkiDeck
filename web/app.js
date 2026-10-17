@@ -36,9 +36,8 @@ function defaultState() {
     wrong: {},        // id -> unix ms of the last wrong answer (study or exam)
     exams: [],        // {at, errors, total, passed}
     firstSeen: null,  // unix ms of the first launch: "day of preparation" for stats
-    // Anonymous telemetry: random id, on/off, whether the notice was shown,
-    // and the self-reported real exam result.
-    tele: { uid: null, on: null, noticeSeen: false, outcome: null, outcomeAt: 0 },
+    // Anonymous telemetry: random id, on/off and the self-reported real exam result.
+    tele: { uid: null, on: null, outcome: null, outcomeAt: 0 },
   };
 }
 
@@ -191,7 +190,9 @@ function dayN() {
 }
 
 function device() {
-  const touch = matchMedia("(pointer: coarse)").matches;
+  // Some browsers report a fine primary pointer on touch devices; any touch input counts.
+  const touch = matchMedia("(pointer: coarse)").matches || matchMedia("(any-pointer: coarse)").matches
+    || navigator.maxTouchPoints > 0;
   const side = Math.min(screen.width, screen.height);
   if (touch && side < 600) return "phone";
   if (touch && side < 1100) return "tablet";
@@ -314,7 +315,6 @@ function renderHome() {
     <button class="ghost" data-go="settings" aria-label="Налаштування">Налаштування</button>
   </div>
   <div class="stack">
-    ${noticeHtml()}
     ${outcomeHtml()}
     <section class="card stack">
       <div class="row spread">
@@ -383,22 +383,6 @@ const OUTCOMES = [
 ];
 const FINAL_OUTCOME = (o) => o && o !== "not_yet";
 
-function noticeHtml() {
-  if (!tele.configured || !S.tele.on || S.tele.noticeSeen) return "";
-  return `
-  <section class="card stack notice">
-    <h2>Безкоштовно й без реклами</h2>
-    <p class="small">Натомість застосунок збирає <b>анонімну</b> статистику навчання: які питання найважчі,
-      скільки часу йде на відповідь, як змінюється результат з днями підготовки. Ні імені, ні IP-адреси,
-      ні місцезнаходження — лише випадковий ідентифікатор браузера. Дані підуть у відкрите дослідження
-      про те, як готуються до іспиту. <a href="#" data-act="privacy">Що саме збирається</a></p>
-    <div class="row">
-      <button class="primary grow" data-act="notice-ok">Зрозуміло</button>
-      <button class="grow" data-act="tele-off">Вимкнути</button>
-    </div>
-  </section>`;
-}
-
 function outcomeHtml() {
   const t = S.tele;
   if (!tele.configured || !t.on || FINAL_OUTCOME(t.outcome)) return "";
@@ -411,21 +395,6 @@ function outcomeHtml() {
     <div class="stack">${OUTCOMES.map(([k, label]) =>
       `<button class="block" data-outcome="${k}">${label}</button>`).join("")}</div>
   </section>`;
-}
-
-function privacyText() {
-  return `
-  <p>Застосунок безкоштовний і без реклами. Щоб зрозуміти, як люди готуються до іспиту, він
-    збирає анонімну статистику й надсилає її в базу даних проєкту (Supabase, ЄС).</p>
-  <p><b>Що збирається:</b> випадковий ідентифікатор браузера (не пов'язаний з вами), номер питання,
-    обрана відповідь і чи вона правильна, час на відповідь, оцінка (Важко/Добре/Легко), стан картки
-    в алгоритмі FSRS, день підготовки, година доби, налаштування темпу, тип пристрою
-    (телефон/планшет/комп'ютер), результати пробних іспитів і ваша відповідь про справжній іспит.</p>
-  <p><b>Що не збирається:</b> ім'я, email, IP-адреса, місцезнаходження, модель пристрою, браузер,
-    будь-що поза цим застосунком.</p>
-  <p>Дані використовуються лише для аналізу навчання й можуть бути опубліковані у відкритому
-    вигляді. Вимкнути збір можна будь-коли в налаштуваннях — після цього нічого не надсилається,
-    а ще не надіслані дані видаляються з пристрою.</p>`;
 }
 
 // ---- study ----
@@ -643,9 +612,9 @@ function renderSettings() {
 
     ${tele.configured ? `
     <section class="card stack">
-      <div class="row spread"><h2>Анонімна статистика</h2>
+      <div class="row spread"><h3>Анонімна статистика</h3>
         <button class="${S.tele.on ? "primary" : ""}" data-act="tele-toggle" style="min-width:96px">${S.tele.on ? "Увімкнено" : "Вимкнено"}</button></div>
-      <div class="note stack">${privacyText()}</div>
+      <p class="note">Допомагає зрозуміти, які питання найважчі. <a href="privacy.html">Що збирається</a></p>
     </section>` : ""}
 
     <section class="card stack">
@@ -689,18 +658,13 @@ app.addEventListener("click", async (e) => {
     return render();
   }
   const act = t.dataset.act;
-  if (act === "notice-ok") { S.tele.noticeSeen = true; save(); return render(); }
-  if (act === "tele-off" || act === "tele-toggle") {
-    S.tele.on = act === "tele-off" ? false : !S.tele.on;
-    S.tele.noticeSeen = true;
+  if (act === "tele-toggle") {
+    S.tele.on = !S.tele.on;
     if (!S.tele.on) tele.clearQueue();
     save();
     return render();
   }
-  if (act === "privacy") {
-    S.tele.noticeSeen = true; save();
-    return go({ name: "settings" });
-  }
+
   if (act === "undo" && view.undo) {
     undoRate(view.undo);
     const id = view.undo.id;

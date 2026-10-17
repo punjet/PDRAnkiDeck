@@ -104,5 +104,6 @@ python build_deck.py data PDR_UA_category_B.apkg
 
 ## Ліцензія та джерела
 
-Код — для особистого використання. Тексти питань, відповіді й малюнки належать
-ГСЦ МВС України (hsc.gov.ua). Незалежна звірка — [Brut322/pdr-test](https://github.com/Brut322/pdr-test) (MIT на код).
+Код — [MIT](LICENSE). Тексти питань, відповіді й малюнки належать ГСЦ МВС України
+(hsc.gov.ua) і під MIT не підпадають — див. розділ *Third-party content* у `LICENSE`.
+Незалежна звірка — [Brut322/pdr-test](https://github.com/Brut322/pdr-test) (MIT).

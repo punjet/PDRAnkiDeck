@@ -7,3 +7,4 @@ work/
 # Built deck (~32 MB): rebuild with build_deck.py or attach to a release
 *.apkg
 .omc/
+data/official_pdf/

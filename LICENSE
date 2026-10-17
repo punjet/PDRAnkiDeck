@@ -27,11 +27,13 @@ The MIT License above covers only the source code in this repository
 (*.py files) and the documentation written for it.
 
 The exam questions, answer options, correct answers and illustrations
-(data/official_pdf/, data/questions.json, data/images/ and any Anki deck built
-from them) are taken from the official exam base of the Main Service Center of
-the Ministry of Internal Affairs of Ukraine (ГСЦ МВС, hsc.gov.ua), order
-No. 225 of 29.10.2025. They are not covered by this license; all rights belong
-to their owner. They are included unmodified in substance for exam preparation.
+(data/questions.json, data/images/ and any Anki deck built from them) are
+taken from the official exam base of the Main Service Center of the Ministry
+of Internal Affairs of Ukraine (ГСЦ МВС, hsc.gov.ua), order No. 225 of
+29.10.2025. They are included, unmodified in substance, for exam preparation.
+They are not covered by this license; all rights belong to their owner.
+The original PDF files are not distributed here; download them from
+hsc.gov.ua.
 
 Answers were cross-checked against https://github.com/Brut322/pdr-test
 (MIT License). No guarantee is given that every answer is correct; verify

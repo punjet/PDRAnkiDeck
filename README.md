@@ -43,7 +43,7 @@
 ## Дані
 
 ```
-data/official_pdf/   офіційні файли ГСЦ: questions.pdf, answers.pdf (скан), order225.pdf
+data/official_pdf/   офіційні PDF ГСЦ — у репозиторії їх немає, див. нижче
 data/questions.json  усі 2332 питання (усі категорії): текст, варіанти, відповідь, статус перевірки
 data/images/         малюнки до питань
 answer_overrides.json  відповіді, звірені вручну зі сканом
@@ -70,7 +70,12 @@ python -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Нові файли — на сторінці ГСЦ «Питання та іспит з ПДР». hsc.gov.ua стоїть за Akamai:
+Офіційні PDF у репозиторій не входять. Їх треба скачати зі сторінки ГСЦ
+[«Питання та іспит з ПДР»](https://hsc.gov.ua/index/poslugi/vidacha-posvidchennya-vodiya/pitannya-ta-ispit-z-pdr/)
+і покласти в `data/official_pdf/` як `questions.pdf` (питання) та `answers.pdf`
+(таблиця відповідей) — для бази за наказом № 225 від 29.10.2025.
+
+hsc.gov.ua стоїть за Akamai:
 з неукраїнського IP — «Access Denied», а з українського звичайний `curl` отримує 403.
 Качати через `curl_cffi`:
 

@@ -1,0 +1,6 @@
+genanki==0.13.1
+pymupdf==1.28.2
+opencv-python-headless==5.0.0.93
+pytesseract==0.3.13
+numpy==2.5.4
+curl_cffi==0.16.3

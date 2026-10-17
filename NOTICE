@@ -1,0 +1,40 @@
+PDRAnkiDeck — Copyright (c) 2026 punjet
+https://github.com/punjet/PDRAnkiDeck
+
+Licensed under Creative Commons Attribution-NonCommercial-ShareAlike 4.0
+International (CC BY-NC-SA 4.0): https://creativecommons.org/licenses/by-nc-sa/4.0/
+
+This covers the author's own work in this repository:
+  * the source code (*.py) and documentation;
+  * the dataset as compiled and verified here: the extraction, the answer
+    verification (fields `verified`, `legacyId`, answer_overrides.json), the
+    tier structure and card order, and the Anki decks built from it.
+
+In short (the legal text below governs):
+  * BY — credit "PDRAnkiDeck by punjet" with a link to the repository and
+    indicate changes;
+  * NC — no commercial use: not in paid apps, paid courses, ad-supported
+    products or anything sold, without written permission from the author;
+  * SA — anything built from this work must be shared under the same license.
+For commercial licensing, open an issue in the repository.
+
+Versions published before this license change were released under the MIT
+License; those copies remain available under MIT.
+
+-------------------------------------------------------------------------------
+Third-party content
+
+The exam questions, answer options, correct answers and illustrations
+(data/questions.json, data/images/ and any Anki deck built from them) are
+taken from the official exam base of the Main Service Center of the Ministry
+of Internal Affairs of Ukraine (ГСЦ МВС, hsc.gov.ua), order No. 225 of
+29.10.2025. They are included, unmodified in substance, for exam preparation.
+The author claims no rights to them, and the license above does not restrict
+anyone's use of the official material obtained from hsc.gov.ua; it applies to
+this compilation and the author's contributions. The original PDF files are not
+distributed here; download them from hsc.gov.ua.
+
+Answers were cross-checked against https://github.com/Brut322/pdr-test
+(MIT License). No guarantee is given that every answer is correct; verify
+against the official source.
+

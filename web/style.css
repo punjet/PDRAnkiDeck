@@ -207,11 +207,14 @@ button:disabled { opacity: .5; cursor: default; }
 .timer { font-variant-numeric: tabular-nums; font-weight: 700; }
 .timer.low { color: var(--bad); }
 .dots { display: grid; grid-template-columns: repeat(10, 1fr); gap: 4px; margin-bottom: 12px; }
-.dot { height: 6px; border-radius: 3px; background: var(--surface-2); }
-.dot.done { background: var(--accent); }
-.dot.cur { background: var(--warn); }
-.dot.ok { background: var(--ok); }
-.dot.bad { background: var(--bad); }
+.dot {
+  min-height: 30px; padding: 0; border-radius: 8px; font-size: 12px; font-weight: 700;
+  background: var(--surface-2); color: var(--muted); border: 2px solid transparent;
+  font-variant-numeric: tabular-nums;
+}
+.dot.ok { background: var(--ok); color: #fff; }
+.dot.bad { background: var(--bad); color: #fff; }
+.dot.cur { border-color: var(--accent); }
 .result-big { font-size: 40px; font-weight: 800; font-variant-numeric: tabular-nums; }
 
 /* settings */

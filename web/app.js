@@ -461,35 +461,66 @@ function newExam() {
   for (const q of DB.questions) (pools[q.block] ||= []).push(q.id);
   const ids = [];
   for (const { block, count } of DB.ticket) ids.push(...shuffle([...pools[block]]).slice(0, count));
-  return { ids, answers: Array(ids.length).fill(null), i: 0, selected: null,
+  return { ids, answers: Array(ids.length).fill(null), i: 0,
            startedAt: Date.now(), shownAt: performance.now(),
            endsAt: Date.now() + EXAM_MINUTES * 60e3 };
 }
 
+// Works like the HSC exam (hsc.gov.ua, 12.02.2026): each answer is marked right or
+// wrong at once, the number strip turns green/red, and a question can be skipped
+// and answered later while time remains.
 function renderExam() {
   if (!view.exam) view.exam = newExam();
   const ex = view.exam;
   if (Date.now() >= ex.endsAt) return finishExam(true);
   const q = byId[ex.ids[ex.i]];
-  const dots = ex.ids.map((_, i) =>
-    `<span class="dot ${i === ex.i ? "cur" : ex.answers[i] !== null ? "done" : ""}"></span>`).join("");
+  const chosen = ex.answers[ex.i];
+  const answered = chosen !== null;
+  const errors = ex.ids.reduce((n, id, i) => n + (ex.answers[i] !== null && ex.answers[i] !== byId[id].a ? 1 : 0), 0);
+  const left = ex.answers.filter((a) => a === null).length;
+  const dots = ex.ids.map((id, i) => {
+    const a = ex.answers[i];
+    const cls = a === null ? "" : a === byId[id].a ? "ok" : "bad";
+    return `<button class="dot ${cls} ${i === ex.i ? "cur" : ""}" data-jump="${i}" aria-label="Питання ${i + 1}">${i + 1}</button>`;
+  }).join("");
+  let dock;
+  if (!left) dock = `<button class="primary block big" data-act="exam-finish">Завершити іспит</button>`;
+  else if (answered) dock = `<button class="primary block big" data-act="exam-next">Далі</button>`;
+  else dock = `<button class="block" data-act="exam-next" ${left > 1 ? "" : "disabled"}>Пропустити</button>`;
   h(`
   <div class="top">
     <button class="ghost" data-act="exam-quit">✕ Вийти</button>
-    <h1 class="small muted" style="text-align:center">Питання ${ex.i + 1} з ${ex.ids.length}</h1>
+    <h1 class="small muted" style="text-align:center">Питання ${ex.i + 1} з ${ex.ids.length}
+      · <span style="color:${errors > EXAM_MAX_ERRORS ? "var(--bad)" : "inherit"}">помилок ${errors}</span></h1>
     <span class="timer" id="timer"></span>
   </div>
   <div class="dots">${dots}</div>
   <article class="card">
     ${questionHtml(q)}
-    ${optionsHtml(q, { selected: ex.selected })}
+    ${optionsHtml(q, { chosen, reveal: answered })}
+    ${answered ? `<p class="verdict ${chosen === q.a ? "ok" : "bad"}">${chosen === q.a
+      ? "Правильно" : `Неправильно. Правильна відповідь — ${q.a + 1}.`}</p>` : ""}
   </article>
-  <div class="dock"><div class="dock-inner">
-    <button class="primary block big" data-act="exam-answer" ${ex.selected === null ? "disabled" : ""}>
-      ${ex.i + 1 < ex.ids.length ? "Відповісти" : "Відповісти й завершити"}</button>
-  </div></div>`);
+  <div class="dock"><div class="dock-inner">${dock}</div></div>`);
+  if (answered) app.querySelector(".opt.right")?.scrollIntoView({ block: "center" });
   tick();
   timerHandle = setInterval(tick, 1000);
+}
+
+function examGoto(i) {
+  const ex = view.exam;
+  ex.i = i;
+  ex.shownAt = performance.now();
+  if (timerHandle) { clearInterval(timerHandle); timerHandle = null; }
+  renderExam();
+}
+
+function nextUnanswered(ex) {
+  for (let k = 1; k <= ex.ids.length; k++) {
+    const i = (ex.i + k) % ex.ids.length;
+    if (ex.answers[i] === null) return i;
+  }
+  return null;
 }
 
 function tick() {
@@ -640,6 +671,7 @@ app.addEventListener("click", async (e) => {
     return go(v);
   }
   if (t.dataset.opt !== undefined) return pickOption(Number(t.dataset.opt));
+  if (t.dataset.jump !== undefined) return examGoto(Number(t.dataset.jump));
   if (t.dataset.rate !== undefined) return doRate(Number(t.dataset.rate));
   if (t.dataset.preset) {
     const p = PRESETS[t.dataset.preset];
@@ -676,17 +708,11 @@ app.addEventListener("click", async (e) => {
     if (learning[0]) { view = { name: "study", current: { id: learning[0][0], kind: "learn" } }; render(); }
     return;
   }
-  if (act === "exam-answer") {
-    const ex = view.exam;
-    ex.answers[ex.i] = ex.selected;
-    trackAnswer(byId[ex.ids[ex.i]], "exam", ex.selected, performance.now() - ex.shownAt);
-    ex.shownAt = performance.now();
-    ex.selected = null;
-    if (ex.i + 1 >= ex.ids.length) return finishExam();
-    ex.i++;
-    if (timerHandle) { clearInterval(timerHandle); timerHandle = null; }
-    return renderExam();
+  if (act === "exam-next") {
+    const i = nextUnanswered(view.exam);
+    return i === null ? finishExam() : examGoto(i);
   }
+  if (act === "exam-finish") return finishExam();
   if (act === "exam-quit") {
     if (confirm("Вийти з іспиту? Результат не буде зараховано.")) go({ name: "home" });
     return;
@@ -729,7 +755,13 @@ app.addEventListener("change", (e) => {
 });
 
 function pickOption(i) {
-  if (view.name === "exam") { view.exam.selected = i; return renderExamKeepTimer(); }
+  if (view.name === "exam") {
+    const ex = view.exam;
+    if (ex.answers[ex.i] !== null) return;
+    ex.answers[ex.i] = i;
+    trackAnswer(byId[ex.ids[ex.i]], "exam", i, performance.now() - ex.shownAt);
+    return renderExamKeepTimer();
+  }
   if ((view.name === "study" || view.name === "drill") && view.state && view.state.chosen === null) {
     view.state.chosen = i;
     view.state.rt = performance.now() - view.state.shownAt;

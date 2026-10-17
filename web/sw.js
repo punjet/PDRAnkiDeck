@@ -3,7 +3,7 @@
 // view or all at once from Settings -> Offline.
 const SHELL = "pdr-shell-__BUILD__";
 const IMG = "pdr-img-v1";
-const FILES = ["./", "index.html", "style.css", "app.js", "vendor/ts-fsrs-5.4.2.mjs",
+const FILES = ["./", "index.html", "style.css", "app.js", "telemetry.js", "config.js", "vendor/ts-fsrs-5.4.2.mjs",
                "questions.json", "manifest.webmanifest", "icon.svg", "icon-192.png"];
 
 self.addEventListener("install", (e) => {

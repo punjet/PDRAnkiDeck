@@ -3,7 +3,9 @@
 // progress lives in this browser's localStorage and can be exported as JSON.
 import { fsrs, generatorParameters, createEmptyCard, Rating, State }
   from "./vendor/ts-fsrs-5.4.2.mjs";
+import * as tele from "./telemetry.js";
 
+const APP_VER = "1.1";
 const STORE_KEY = "pdr-b-v1";
 const IMG_CACHE = "pdr-img-v1";
 const DAY_START_HOUR = 4;          // Anki's default "next day starts at"
@@ -33,6 +35,10 @@ function defaultState() {
     day: { key: "", newDone: 0, reviewsDone: 0 },
     wrong: {},        // id -> unix ms of the last wrong answer (study or exam)
     exams: [],        // {at, errors, total, passed}
+    firstSeen: null,  // unix ms of the first launch: "day of preparation" for stats
+    // Anonymous telemetry: random id, on/off, whether the notice was shown,
+    // and the self-reported real exam result.
+    tele: { uid: null, on: null, noticeSeen: false, outcome: null, outcomeAt: 0 },
   };
 }
 
@@ -175,6 +181,50 @@ function fmtInterval(ms) {
   return `${(d / 365).toFixed(1)} р`;
 }
 
+// ---------- telemetry context ----------
+const SID = crypto.randomUUID();
+
+function dayN() {
+  const start = new Date((S.firstSeen || Date.now()) - DAY_START_HOUR * 3600e3); start.setHours(0, 0, 0, 0);
+  const now = new Date(Date.now() - DAY_START_HOUR * 3600e3); now.setHours(0, 0, 0, 0);
+  return Math.max(0, Math.round((now - start) / 864e5));
+}
+
+function device() {
+  const touch = matchMedia("(pointer: coarse)").matches;
+  const side = Math.min(screen.width, screen.height);
+  if (touch && side < 600) return "phone";
+  if (touch && side < 1100) return "tablet";
+  return "desktop";
+}
+
+function progressCounts() {
+  let known = 0, started = 0;
+  for (const c of Object.values(S.cards)) { started++; if (c.state === State.Review) known++; }
+  return { known, started };
+}
+
+function trackAnswer(q, mode, chosen, rtMs, rating = null, before = null) {
+  tele.track("answers", {
+    uid: S.tele.uid, sid: SID, qid: q.id, mode, chosen, correct: chosen === q.a,
+    n_options: q.o.length,
+    rt_ms: Number.isFinite(rtMs) ? Math.min(3600000, Math.max(0, Math.round(rtMs))) : null,
+    rating,
+    state: before ? before.state : null,
+    stability: before ? before.stability : null,
+    difficulty: before ? before.difficulty : null,
+    reps: before ? before.reps : null,
+    lapses: before ? before.lapses : null,
+    elapsed_days: before && before.last_review
+      ? Math.max(0, (Date.now() - new Date(before.last_review).getTime()) / 864e5) : null,
+    day_n: dayN(), local_hour: new Date().getHours(),
+    preset: S.settings.preset, new_per_day: S.settings.newPerDay, retention: S.settings.retention,
+    device: device(),
+    standalone: matchMedia("(display-mode: standalone)").matches || navigator.standalone === true,
+    app_ver: APP_VER,
+  });
+}
+
 // ---------- helpers ----------
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -264,6 +314,8 @@ function renderHome() {
     <button class="ghost" data-go="settings" aria-label="Налаштування">Налаштування</button>
   </div>
   <div class="stack">
+    ${noticeHtml()}
+    ${outcomeHtml()}
     <section class="card stack">
       <div class="row spread">
         <h2>Сьогодні</h2>
@@ -323,6 +375,59 @@ function renderHome() {
   </footer>`);
 }
 
+const OUTCOMES = [
+  ["passed_first", "Склав з першої спроби"],
+  ["passed_retry", "Склав, але не з першої"],
+  ["failed", "Не склав"],
+  ["not_yet", "Ще не складав"],
+];
+const FINAL_OUTCOME = (o) => o && o !== "not_yet";
+
+function noticeHtml() {
+  if (!tele.configured || !S.tele.on || S.tele.noticeSeen) return "";
+  return `
+  <section class="card stack notice">
+    <h2>Безкоштовно й без реклами</h2>
+    <p class="small">Натомість застосунок збирає <b>анонімну</b> статистику навчання: які питання найважчі,
+      скільки часу йде на відповідь, як змінюється результат з днями підготовки. Ні імені, ні IP-адреси,
+      ні місцезнаходження — лише випадковий ідентифікатор браузера. Дані підуть у відкрите дослідження
+      про те, як готуються до іспиту. <a href="#" data-act="privacy">Що саме збирається</a></p>
+    <div class="row">
+      <button class="primary grow" data-act="notice-ok">Зрозуміло</button>
+      <button class="grow" data-act="tele-off">Вимкнути</button>
+    </div>
+  </section>`;
+}
+
+function outcomeHtml() {
+  const t = S.tele;
+  if (!tele.configured || !t.on || FINAL_OUTCOME(t.outcome)) return "";
+  if (t.outcome === "not_yet" && Date.now() - t.outcomeAt < 3 * 864e5) return "";
+  if (dayN() < 5 && S.exams.length < 3) return "";
+  return `
+  <section class="card stack">
+    <h2>Як пройшов справжній іспит?</h2>
+    <p class="muted small">Одна відповідь — і ми зрозуміємо, що в підготовці справді допомагає.</p>
+    <div class="stack">${OUTCOMES.map(([k, label]) =>
+      `<button class="block" data-outcome="${k}">${label}</button>`).join("")}</div>
+  </section>`;
+}
+
+function privacyText() {
+  return `
+  <p>Застосунок безкоштовний і без реклами. Щоб зрозуміти, як люди готуються до іспиту, він
+    збирає анонімну статистику й надсилає її в базу даних проєкту (Supabase, ЄС).</p>
+  <p><b>Що збирається:</b> випадковий ідентифікатор браузера (не пов'язаний з вами), номер питання,
+    обрана відповідь і чи вона правильна, час на відповідь, оцінка (Важко/Добре/Легко), стан картки
+    в алгоритмі FSRS, день підготовки, година доби, налаштування темпу, тип пристрою
+    (телефон/планшет/комп'ютер), результати пробних іспитів і ваша відповідь про справжній іспит.</p>
+  <p><b>Що не збирається:</b> ім'я, email, IP-адреса, місцезнаходження, модель пристрою, браузер,
+    будь-що поза цим застосунком.</p>
+  <p>Дані використовуються лише для аналізу навчання й можуть бути опубліковані у відкритому
+    вигляді. Вимкнути збір можна будь-коли в налаштуваннях — після цього нічого не надсилається,
+    а ще не надіслані дані видаляються з пристрою.</p>`;
+}
+
 // ---- study ----
 function renderStudy() {
   const pick = view.current || nextCard();
@@ -344,7 +449,7 @@ function renderStudy() {
   view.current = pick;
   const q = byId[pick.id];
   const { learn, review, fresh } = queueCounts();
-  const st = view.state || { chosen: null };
+  const st = view.state || { chosen: null, shownAt: performance.now() };
   view.state = st;
   const answered = st.chosen !== null;
   const correct = answered && st.chosen === q.a;
@@ -388,6 +493,7 @@ function newExam() {
   const ids = [];
   for (const { block, count } of DB.ticket) ids.push(...shuffle([...pools[block]]).slice(0, count));
   return { ids, answers: Array(ids.length).fill(null), i: 0, selected: null,
+           startedAt: Date.now(), shownAt: performance.now(),
            endsAt: Date.now() + EXAM_MINUTES * 60e3 };
 }
 
@@ -436,6 +542,14 @@ function finishExam(timeout = false) {
   const rec = { at: Date.now(), errors, total: ex.ids.length, passed: errors <= EXAM_MAX_ERRORS, timeout };
   S.exams.push(rec);
   save();
+  tele.track("exams", {
+    uid: S.tele.uid, sid: SID, errors, total: ex.ids.length, passed: rec.passed, timeout,
+    duration_s: Math.min(7200, Math.round((Date.now() - ex.startedAt) / 1000)),
+    wrong_qids: ex.ids.filter((id, i) => ex.answers[i] !== byId[id].a),
+    day_n: dayN(), local_hour: new Date().getHours(), ...progressCounts(),
+    device: device(), app_ver: APP_VER,
+  });
+  tele.flush();
   go({ name: "result", exam: ex, rec });
 }
 
@@ -478,7 +592,7 @@ function renderDrill() {
     return;
   }
   const q = byId[id];
-  const st = view.state || { chosen: null };
+  const st = view.state || { chosen: null, shownAt: performance.now() };
   view.state = st;
   const answered = st.chosen !== null;
   const correct = answered && st.chosen === q.a;
@@ -527,6 +641,13 @@ function renderSettings() {
       <button class="block" data-act="offline" id="offlineBtn">Зберегти для офлайну</button>
     </section>
 
+    ${tele.configured ? `
+    <section class="card stack">
+      <div class="row spread"><h2>Анонімна статистика</h2>
+        <button class="${S.tele.on ? "primary" : ""}" data-act="tele-toggle" style="min-width:96px">${S.tele.on ? "Увімкнено" : "Вимкнено"}</button></div>
+      <div class="note stack">${privacyText()}</div>
+    </section>` : ""}
+
     <section class="card stack">
       <h2>Прогрес</h2>
       <p class="note">Прогрес зберігається лише в цьому браузері. Зробіть резервну копію, щоб перенести його на інший пристрій.</p>
@@ -541,8 +662,9 @@ function renderSettings() {
 
 // ---------- events ----------
 app.addEventListener("click", async (e) => {
-  const t = e.target.closest("button, [data-go]");
+  const t = e.target.closest("button, [data-go], [data-act]");
   if (!t || t.disabled) return;
+  if (t.tagName === "A") e.preventDefault();
   if (t.dataset.go) {
     const v = { name: t.dataset.go };
     if (v.name === "exam" && view.name === "exam" && view.exam && !confirm("Почати новий іспит?")) return;
@@ -555,7 +677,30 @@ app.addEventListener("click", async (e) => {
     S.settings = { preset: t.dataset.preset, ...p };
     save(); makeScheduler(); return render();
   }
+  if (t.dataset.outcome) {
+    S.tele.outcome = t.dataset.outcome;
+    S.tele.outcomeAt = Date.now();
+    save();
+    tele.track("outcomes", {
+      uid: S.tele.uid, result: t.dataset.outcome, day_n: dayN(), ...progressCounts(),
+      reviews: S.logs.length, mock_exams: S.exams.length, app_ver: APP_VER,
+    });
+    tele.flush();
+    return render();
+  }
   const act = t.dataset.act;
+  if (act === "notice-ok") { S.tele.noticeSeen = true; save(); return render(); }
+  if (act === "tele-off" || act === "tele-toggle") {
+    S.tele.on = act === "tele-off" ? false : !S.tele.on;
+    S.tele.noticeSeen = true;
+    if (!S.tele.on) tele.clearQueue();
+    save();
+    return render();
+  }
+  if (act === "privacy") {
+    S.tele.noticeSeen = true; save();
+    return go({ name: "settings" });
+  }
   if (act === "undo" && view.undo) {
     undoRate(view.undo);
     const id = view.undo.id;
@@ -570,6 +715,8 @@ app.addEventListener("click", async (e) => {
   if (act === "exam-answer") {
     const ex = view.exam;
     ex.answers[ex.i] = ex.selected;
+    trackAnswer(byId[ex.ids[ex.i]], "exam", ex.selected, performance.now() - ex.shownAt);
+    ex.shownAt = performance.now();
     ex.selected = null;
     if (ex.i + 1 >= ex.ids.length) return finishExam();
     ex.i++;
@@ -605,7 +752,8 @@ app.addEventListener("click", async (e) => {
   if (act === "export") return exportProgress();
   if (act === "reset") {
     if (confirm("Видалити весь прогрес, історію іспитів і помилки? Це не можна скасувати.")) {
-      S = defaultState(); save(); makeScheduler(); go({ name: "home" });
+      const keep = { tele: S.tele };
+      S = { ...defaultState(), ...keep, firstSeen: Date.now() }; save(); makeScheduler(); go({ name: "home" });
     }
     return;
   }
@@ -620,6 +768,8 @@ function pickOption(i) {
   if (view.name === "exam") { view.exam.selected = i; return renderExamKeepTimer(); }
   if ((view.name === "study" || view.name === "drill") && view.state && view.state.chosen === null) {
     view.state.chosen = i;
+    view.state.rt = performance.now() - view.state.shownAt;
+    if (view.name === "drill") trackAnswer(byId[view.queue[0]], "drill", i, view.state.rt);
     render();
     // On a phone the right answer can sit under the bottom bar: bring it into view.
     app.querySelector(".opt.right")?.scrollIntoView({ block: "center" });
@@ -635,6 +785,9 @@ function renderExamKeepTimer() {
 
 function doRate(r) {
   const id = view.current.id;
+  // Logged at grading time so the FSRS state is the one before this answer.
+  // An undone answer stays in the stats: the person did answer it that way.
+  trackAnswer(byId[id], "study", view.state.chosen, view.state.rt, r, S.cards[id] || createEmptyCard(new Date()));
   const undo = rate(id, r);
   view = { name: "study", undo };
   render();
@@ -670,6 +823,7 @@ async function importProgress(file) {
     if (data.app !== STORE_KEY || !data.state || typeof data.state.cards !== "object") throw new Error("format");
     if (!confirm("Замінити поточний прогрес даними з файлу?")) return;
     S = { ...defaultState(), ...data.state };
+    S.tele = { ...defaultState().tele, ...S.tele };
     save(); makeScheduler(); go({ name: "home" });
   } catch (err) {
     alert("Це не файл прогресу цього застосунку.");
@@ -705,7 +859,14 @@ async function saveOffline(btn) {
 // ---------- boot ----------
 async function boot() {
   S = load();
+  S.tele = { ...defaultState().tele, ...S.tele };
+  if (!S.firstSeen) S.firstSeen = Date.now();
+  if (!S.tele.uid) S.tele.uid = crypto.randomUUID();
+  // On by default; a browser-wide "do not sell or share" signal turns it off.
+  if (S.tele.on === null) S.tele.on = navigator.globalPrivacyControl !== true;
+  save();
   makeScheduler();
+  tele.init(() => S.tele.on);
   try {
     const r = await fetch("questions.json");
     if (!r.ok) throw new Error(r.status);

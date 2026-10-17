@@ -222,6 +222,7 @@ input[type="number"], select {
 }
 .seg { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
 .seg button.on { border-color: var(--accent); background: var(--accent-soft); font-weight: 600; }
+.notice { border-color: var(--accent); background: var(--accent-soft); }
 .note { font-size: 13px; color: var(--muted); }
 footer { margin-top: 24px; font-size: 13px; color: var(--muted); text-align: center; }
 footer a { color: var(--muted); }

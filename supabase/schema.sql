@@ -1,5 +1,6 @@
 -- Anonymous learning telemetry for the PDR web app.
--- Run once in Supabase: Dashboard -> SQL Editor -> paste -> Run.
+-- Run in Supabase: Dashboard -> SQL Editor -> paste -> Run. Safe to re-run after
+-- updates: it only adds what is missing and keeps the data.
 --
 -- The browser holds the public (anon / publishable) key, so anyone can call the
 -- API with it. That key can only call ingest() below, which appends rows: nobody
@@ -76,14 +77,47 @@ create table if not exists public.outcomes (
   app_ver       text check (length(app_ver) <= 32)
 );
 
+-- v1.2: mock exams left midway (the "Вийти" button).
+alter table public.exams add column if not exists abandoned boolean not null default false;
+alter table public.exams add column if not exists answered  smallint check (answered between 0 and 20);
+alter table public.exams add column if not exists quit_at   smallint check (quit_at between 1 and 20);   -- question number on screen
+alter table public.exams add column if not exists quit_qid  text check (length(quit_qid) <= 16);
+
+-- v1.2: sessions. A row when the app opens (seq 0), then one per minute of
+-- visible time and one when the page is hidden. Session length = max(active_s)
+-- per sid; the last row of a sid shows the screen and question the person left on.
+create table if not exists public.pings (
+  id            bigint generated always as identity primary key,
+  created_at    timestamptz not null default now(),
+  eid           uuid not null unique,
+  uid           uuid not null,
+  sid           uuid not null,
+  seq           integer not null check (seq between 0 and 100000),
+  kind          text not null check (kind in ('start', 'beat', 'hide')),
+  active_s      integer not null check (active_s between 0 and 86400),   -- visible time in this session
+  answers       integer not null check (answers between 0 and 100000),   -- answers in this session
+  screen        text check (screen in ('home', 'study', 'exam', 'result', 'drill', 'settings')),
+  qid           text check (length(qid) <= 16),                          -- question on screen, if any
+  first_visit   boolean,                                                 -- first session of this uid
+  src           text check (src ~ '^[a-z0-9_.-]{1,40}$'),                -- ?src= / utm tag of this visit
+  first_src     text check (first_src ~ '^[a-z0-9_.-]{1,40}$'),          -- tag of the very first visit
+  ref           text check (length(ref) <= 64),                          -- referrer domain only
+  day_n         integer not null check (day_n between 0 and 10000),
+  local_hour    smallint not null check (local_hour between 0 and 23),
+  device        text check (device in ('phone', 'tablet', 'desktop')),
+  standalone    boolean,
+  app_ver       text check (length(app_ver) <= 32)
+);
+
 -- No direct table access for the public key at all: RLS on, no policies, no grants.
 alter table public.answers  enable row level security;
 alter table public.exams    enable row level security;
 alter table public.outcomes enable row level security;
-revoke all on public.answers, public.exams, public.outcomes from anon, authenticated;
+alter table public.pings    enable row level security;
+revoke all on public.answers, public.exams, public.outcomes, public.pings from anon, authenticated;
 
 -- The only entry point: POST /rest/v1/rpc/ingest {"t": "answers", "rows": [...]}.
--- Runs as the owner, accepts only these three tables and at most 200 rows per
+-- Runs as the owner, accepts only these four tables and at most 200 rows per
 -- call; CHECK constraints still apply, and a re-sent row (same eid) is skipped.
 create or replace function public.ingest(t text, rows jsonb)
 returns void
@@ -101,14 +135,19 @@ begin
     from jsonb_populate_recordset(null::public.answers, rows)
     on conflict (eid) do nothing;
   elsif t = 'exams' then
-    insert into public.exams (eid, uid, sid, errors, total, passed, timeout, duration_s, wrong_qids, day_n, local_hour, known, started, device, app_ver)
-    select eid, uid, sid, errors, total, passed, timeout, duration_s, wrong_qids, day_n, local_hour, known, started, device, app_ver
+    insert into public.exams (eid, uid, sid, errors, total, passed, timeout, duration_s, wrong_qids, day_n, local_hour, known, started, device, app_ver, abandoned, answered, quit_at, quit_qid)
+    select eid, uid, sid, errors, total, passed, timeout, duration_s, wrong_qids, day_n, local_hour, known, started, device, app_ver, abandoned, answered, quit_at, quit_qid
     from jsonb_populate_recordset(null::public.exams, rows)
     on conflict (eid) do nothing;
   elsif t = 'outcomes' then
     insert into public.outcomes (eid, uid, result, day_n, known, started, reviews, mock_exams, app_ver)
     select eid, uid, result, day_n, known, started, reviews, mock_exams, app_ver
     from jsonb_populate_recordset(null::public.outcomes, rows)
+    on conflict (eid) do nothing;
+  elsif t = 'pings' then
+    insert into public.pings (eid, uid, sid, seq, kind, active_s, answers, screen, qid, first_visit, src, first_src, ref, day_n, local_hour, device, standalone, app_ver)
+    select eid, uid, sid, seq, kind, active_s, answers, screen, qid, first_visit, src, first_src, ref, day_n, local_hour, device, standalone, app_ver
+    from jsonb_populate_recordset(null::public.pings, rows)
     on conflict (eid) do nothing;
   else
     raise exception 'unknown table %', t;
@@ -122,3 +161,5 @@ grant execute on function public.ingest(text, jsonb) to anon;
 create index if not exists answers_qid_idx on public.answers (qid);
 create index if not exists answers_uid_idx on public.answers (uid, created_at);
 create index if not exists exams_uid_idx   on public.exams (uid, created_at);
+create index if not exists pings_sid_idx   on public.pings (sid, seq);
+create index if not exists pings_uid_idx   on public.pings (uid, created_at);

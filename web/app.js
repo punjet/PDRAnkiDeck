@@ -5,7 +5,7 @@ import { fsrs, generatorParameters, createEmptyCard, Rating, State }
   from "./vendor/ts-fsrs-5.4.2.mjs";
 import * as tele from "./telemetry.js";
 
-const APP_VER = "1.1";
+const APP_VER = "1.2";
 const STORE_KEY = "pdr-b-v1";
 const IMG_CACHE = "pdr-img-v1";
 const DAY_START_HOUR = 4;          // Anki's default "next day starts at"
@@ -37,7 +37,7 @@ function defaultState() {
     exams: [],        // {at, errors, total, passed}
     firstSeen: null,  // unix ms of the first launch: "day of preparation" for stats
     // Anonymous telemetry: random id, on/off and the self-reported real exam result.
-    tele: { uid: null, on: null, outcome: null, outcomeAt: 0 },
+    tele: { uid: null, on: null, outcome: null, outcomeAt: 0, visited: false, firstSrc: null },
   };
 }
 
@@ -181,7 +181,100 @@ function fmtInterval(ms) {
 }
 
 // ---------- telemetry context ----------
-const SID = crypto.randomUUID();
+let SID = crypto.randomUUID();
+const SESSION_GAP_MS = 30 * 60e3;   // hidden longer than this -> next visit is a new session
+const BEAT_MS = 60e3;               // one ping per minute of visible time
+
+// Visible-time clock: stops while the tab is hidden, so answer times and session
+// length do not count minutes spent in another app.
+let hiddenTotal = 0;
+let hiddenSince = document.visibilityState === "hidden" ? performance.now() : null;
+function activeNow() {
+  const t = performance.now();
+  return t - hiddenTotal - (hiddenSince !== null ? t - hiddenSince : 0);
+}
+
+// Session bookkeeping for the pings table.
+const sess = { base: 0, seq: 0, answers: 0, lastBeat: 0, hidePinged: false, src: null, ref: null };
+
+function cleanTag(v) {
+  if (!v) return null;
+  const t = String(v).toLowerCase().replace(/[^a-z0-9_.-]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 40);
+  return t || null;
+}
+
+// ?src=reddit_ukraina, or utm_source[+utm_campaign]; referrer is kept as a bare domain.
+function readSource() {
+  const q = new URLSearchParams(location.search);
+  const utm = q.get("utm_source") && [q.get("utm_source"), q.get("utm_campaign")].filter(Boolean).join("-");
+  sess.src = cleanTag(q.get("src") || utm);
+  try {
+    const host = document.referrer ? new URL(document.referrer).hostname.replace(/^www\./, "") : "";
+    sess.ref = host && host !== location.hostname ? host.slice(0, 64) : null;
+  } catch (e) { sess.ref = null; }
+  if (q.has("src") || q.has("utm_source") || q.has("utm_campaign") || q.has("utm_medium")) {
+    // Drop the tag from the address bar so a shared or bookmarked link does not reuse it.
+    for (const k of ["src", "utm_source", "utm_campaign", "utm_medium", "utm_content", "utm_term"]) q.delete(k);
+    const rest = q.toString();
+    history.replaceState(null, "", location.pathname + (rest ? `?${rest}` : "") + location.hash);
+  }
+}
+
+function currentQid() {
+  if (view.name === "study") return view.current?.id || null;
+  if (view.name === "drill") return view.queue?.[0] || null;
+  if (view.name === "exam") return view.exam ? view.exam.ids[view.exam.i] : null;
+  return null;
+}
+
+function ping(kind) {
+  const start = kind === "start";
+  tele.track("pings", {
+    uid: S.tele.uid, sid: SID, seq: sess.seq++, kind,
+    active_s: Math.min(86400, Math.round((activeNow() - sess.base) / 1000)),
+    answers: sess.answers, screen: view.name, qid: currentQid(),
+    first_visit: start ? !S.tele.visited : null,
+    src: start ? sess.src : null,
+    first_src: start ? S.tele.firstSrc : null,
+    ref: start ? sess.ref : null,
+    day_n: dayN(), local_hour: new Date().getHours(), device: device(),
+    standalone: matchMedia("(display-mode: standalone)").matches || navigator.standalone === true,
+    app_ver: APP_VER,
+  });
+  if (start && !S.tele.visited) { S.tele.visited = true; save(); }
+  sess.lastBeat = activeNow();
+}
+
+function startSession() {
+  sess.base = activeNow();
+  sess.seq = 0;
+  sess.answers = 0;
+  ping("start");
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (!S) return;
+  if (document.visibilityState === "hidden") {
+    hiddenSince = performance.now();
+    if (!sess.hidePinged) { ping("hide"); sess.hidePinged = true; tele.flush(true); }
+  } else if (hiddenSince !== null) {
+    const away = performance.now() - hiddenSince;
+    hiddenTotal += away;
+    hiddenSince = null;
+    sess.hidePinged = false;
+    if (away > SESSION_GAP_MS && DB) {
+      SID = crypto.randomUUID();
+      sess.src = null; sess.ref = null;
+      startSession();
+    }
+  }
+});
+window.addEventListener("pagehide", () => {
+  if (S && !sess.hidePinged) { ping("hide"); sess.hidePinged = true; tele.flush(true); }
+});
+setInterval(() => {
+  if (S && DB && document.visibilityState === "visible" && activeNow() - sess.lastBeat >= BEAT_MS) ping("beat");
+}, 5e3);
 
 function dayN() {
   const start = new Date((S.firstSeen || Date.now()) - DAY_START_HOUR * 3600e3); start.setHours(0, 0, 0, 0);
@@ -206,6 +299,7 @@ function progressCounts() {
 }
 
 function trackAnswer(q, mode, chosen, rtMs, rating = null, before = null) {
+  sess.answers++;
   tele.track("answers", {
     uid: S.tele.uid, sid: SID, qid: q.id, mode, chosen, correct: chosen === q.a,
     n_options: q.o.length,
@@ -418,7 +512,7 @@ function renderStudy() {
   view.current = pick;
   const q = byId[pick.id];
   const { learn, review, fresh } = queueCounts();
-  const st = view.state || { chosen: null, shownAt: performance.now() };
+  const st = view.state || { chosen: null, shownAt: activeNow() };
   view.state = st;
   const answered = st.chosen !== null;
   const correct = answered && st.chosen === q.a;
@@ -462,7 +556,7 @@ function newExam() {
   const ids = [];
   for (const { block, count } of DB.ticket) ids.push(...shuffle([...pools[block]]).slice(0, count));
   return { ids, answers: Array(ids.length).fill(null), i: 0,
-           startedAt: Date.now(), shownAt: performance.now(),
+           startedAt: Date.now(), shownAt: activeNow(),
            endsAt: Date.now() + EXAM_MINUTES * 60e3 };
 }
 
@@ -510,7 +604,7 @@ function renderExam() {
 function examGoto(i) {
   const ex = view.exam;
   ex.i = i;
-  ex.shownAt = performance.now();
+  ex.shownAt = activeNow();
   if (timerHandle) { clearInterval(timerHandle); timerHandle = null; }
   renderExam();
 }
@@ -548,6 +642,7 @@ function finishExam(timeout = false) {
     wrong_qids: ex.ids.filter((id, i) => ex.answers[i] !== byId[id].a),
     day_n: dayN(), local_hour: new Date().getHours(), ...progressCounts(),
     device: device(), app_ver: APP_VER,
+    abandoned: false, answered: ex.answers.filter((a) => a !== null).length, quit_at: null, quit_qid: null,
   });
   tele.flush();
   go({ name: "result", exam: ex, rec });
@@ -592,7 +687,7 @@ function renderDrill() {
     return;
   }
   const q = byId[id];
-  const st = view.state || { chosen: null, shownAt: performance.now() };
+  const st = view.state || { chosen: null, shownAt: activeNow() };
   view.state = st;
   const answered = st.chosen !== null;
   const correct = answered && st.chosen === q.a;
@@ -714,8 +809,20 @@ app.addEventListener("click", async (e) => {
   }
   if (act === "exam-finish") return finishExam();
   if (act === "exam-quit") {
-    if (confirm("Вийти з іспиту? Результат не буде зараховано.")) go({ name: "home" });
-    return;
+    if (!confirm("Вийти з іспиту? Результат не буде зараховано.")) return;
+    const ex = view.exam;
+    const answered = ex.answers.filter((a) => a !== null).length;
+    tele.track("exams", {
+      uid: S.tele.uid, sid: SID,
+      errors: ex.ids.reduce((n, id, i) => n + (ex.answers[i] !== null && ex.answers[i] !== byId[id].a ? 1 : 0), 0),
+      total: ex.ids.length, passed: false, timeout: false,
+      duration_s: Math.min(7200, Math.round((Date.now() - ex.startedAt) / 1000)),
+      wrong_qids: ex.ids.filter((id, i) => ex.answers[i] !== null && ex.answers[i] !== byId[id].a),
+      day_n: dayN(), local_hour: new Date().getHours(), ...progressCounts(),
+      device: device(), app_ver: APP_VER,
+      abandoned: true, answered, quit_at: ex.i + 1, quit_qid: ex.ids[ex.i],
+    });
+    return go({ name: "home" });
   }
   if (act === "drill-next") {
     const id = view.queue.shift();
@@ -759,12 +866,12 @@ function pickOption(i) {
     const ex = view.exam;
     if (ex.answers[ex.i] !== null) return;
     ex.answers[ex.i] = i;
-    trackAnswer(byId[ex.ids[ex.i]], "exam", i, performance.now() - ex.shownAt);
+    trackAnswer(byId[ex.ids[ex.i]], "exam", i, activeNow() - ex.shownAt);
     return renderExamKeepTimer();
   }
   if ((view.name === "study" || view.name === "drill") && view.state && view.state.chosen === null) {
     view.state.chosen = i;
-    view.state.rt = performance.now() - view.state.shownAt;
+    view.state.rt = activeNow() - view.state.shownAt;
     if (view.name === "drill") trackAnswer(byId[view.queue[0]], "drill", i, view.state.rt);
     render();
     // On a phone the right answer can sit under the bottom bar: bring it into view.
@@ -858,6 +965,8 @@ async function boot() {
   S.tele = { ...defaultState().tele, ...S.tele };
   if (!S.firstSeen) S.firstSeen = Date.now();
   if (!S.tele.uid) S.tele.uid = crypto.randomUUID();
+  readSource();
+  if (!S.tele.visited && !S.tele.firstSrc) S.tele.firstSrc = sess.src || null;
   // On by default; a browser-wide "do not sell or share" signal turns it off.
   if (S.tele.on === null) S.tele.on = navigator.globalPrivacyControl !== true;
   save();
@@ -876,6 +985,7 @@ async function boot() {
   for (const id of Object.keys(S.cards)) if (!byId[id]) delete S.cards[id];
   for (const id of Object.keys(S.wrong)) if (!byId[id]) delete S.wrong[id];
   render();
+  startSession();
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 }
 

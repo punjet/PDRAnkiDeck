@@ -129,3 +129,73 @@ select day_n, count(distinct uid) as active_learners
 from answers
 group by day_n
 order by day_n;
+
+-- ===== Sessions, returns, sources (v1.2, table pings) =====
+
+-- 11. Session length: visible minutes per session (median and quartiles), by device.
+with s as (
+  select sid, max(active_s) as active_s, max(answers) as answers,
+         (array_agg(device order by seq))[1] as device
+  from pings group by sid
+)
+select device, count(*) as sessions,
+       round((percentile_cont(0.25) within group (order by active_s) / 60)::numeric, 1) as p25_min,
+       round((percentile_cont(0.5)  within group (order by active_s) / 60)::numeric, 1) as median_min,
+       round((percentile_cont(0.75) within group (order by active_s) / 60)::numeric, 1) as p75_min,
+       round(100.0 * avg((answers = 0)::int), 1) as no_answer_pct
+from s group by device order by sessions desc;
+
+-- 12. Bounce: first sessions that ended without a single answer, and how fast.
+with first_s as (
+  select distinct on (uid) uid, sid from pings where kind = 'start' and first_visit order by uid, created_at
+),
+s as (select sid, max(active_s) active_s, max(answers) answers from pings group by sid)
+select count(*) as first_sessions,
+       round(100.0 * avg((s.answers = 0)::int), 1) as left_without_answer_pct,
+       percentile_cont(0.5) within group (order by s.active_s) filter (where s.answers = 0) as median_seconds_before_leaving
+from first_s join s using (sid);
+
+-- 13. Returns: share of people active again N days after their first day.
+with d as (select uid, day_n from pings group by uid, day_n),
+c as (select count(distinct uid) n from d where day_n = 0)
+select day_n, count(distinct uid) as people,
+       round(100.0 * count(distinct uid) / nullif((select n from c), 0), 1) as pct_of_day0
+from d where day_n <= 21 group by day_n order by day_n;
+
+-- 14. Sessions per person and active days per person.
+select count(distinct sid)::float / nullif(count(distinct uid), 0) as sessions_per_person,
+       (select avg(n) from (select uid, count(distinct day_n) n from pings group by uid) x) as active_days_per_person
+from pings;
+
+-- 15. Where people leave: screen and question on the last ping of each session.
+with last as (
+  select distinct on (sid) sid, screen, qid from pings order by sid, seq desc
+)
+select screen, qid, count(*) as sessions_ended_here
+from last group by screen, qid order by sessions_ended_here desc limit 30;
+
+-- 16. Sources: people per tag/referrer and how far they got.
+with first_start as (
+  select distinct on (uid) uid, coalesce(first_src, src, 'direct') as tag, ref
+  from pings where kind = 'start' order by uid, created_at
+),
+work as (select uid, count(*) filter (where mode = 'study') reviews from answers group by uid),
+mock as (select uid, count(*) filter (where not abandoned) mocks from exams group by uid)
+select f.tag, coalesce(f.ref, '-') as referrer, count(*) as people,
+       round(100.0 * avg((coalesce(w.reviews, 0) > 0)::int), 1) as answered_any_pct,
+       round(100.0 * avg((coalesce(w.reviews, 0) >= 500)::int), 1) as did_500_reviews_pct,
+       round(100.0 * avg((coalesce(m.mocks, 0) > 0)::int), 1) as took_mock_exam_pct
+from first_start f left join work w using (uid) left join mock m using (uid)
+group by 1, 2 order by people desc;
+
+-- 17. Mock exams left midway: how often, at which question, after how many errors.
+select count(*) filter (where abandoned) as abandoned,
+       count(*) filter (where not abandoned) as finished,
+       round(100.0 * avg(abandoned::int), 1) as abandoned_pct,
+       round(avg(quit_at) filter (where abandoned), 1) as avg_question_on_quit,
+       round(avg(errors) filter (where abandoned), 2) as avg_errors_on_quit
+from exams;
+
+-- 18. Questions people quit the mock exam on.
+select quit_qid, count(*) as quits, round(avg(errors), 2) as avg_errors_before
+from exams where abandoned group by quit_qid order by quits desc limit 20;

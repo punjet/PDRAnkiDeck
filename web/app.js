@@ -737,13 +737,6 @@ function renderSettings() {
       <button class="block" data-act="offline" id="offlineBtn">Зберегти для офлайну</button>
     </section>
 
-    ${tele.configured ? `
-    <section class="card stack">
-      <div class="row spread"><h3>Анонімна статистика</h3>
-        <button class="${S.tele.on ? "primary" : ""}" data-act="tele-toggle" style="min-width:96px">${S.tele.on ? "Увімкнено" : "Вимкнено"}</button></div>
-      <p class="note">Допомагає зрозуміти, які питання найважчі. <a href="privacy.html">Що збирається</a></p>
-    </section>` : ""}
-
     <section class="card stack">
       <h2>Прогрес</h2>
       <p class="note">Прогрес зберігається лише в цьому браузері. Зробіть резервну копію, щоб перенести його на інший пристрій.</p>
@@ -786,12 +779,6 @@ app.addEventListener("click", async (e) => {
     return render();
   }
   const act = t.dataset.act;
-  if (act === "tele-toggle") {
-    S.tele.on = !S.tele.on;
-    if (!S.tele.on) tele.clearQueue();
-    save();
-    return render();
-  }
 
   if (act === "undo" && view.undo) {
     undoRate(view.undo);
@@ -968,8 +955,8 @@ async function boot() {
   if (!S.tele.uid) S.tele.uid = crypto.randomUUID();
   readSource();
   if (!S.tele.visited && !S.tele.firstSrc) S.tele.firstSrc = sess.src || null;
-  // On by default; a browser-wide "do not sell or share" signal turns it off.
-  if (S.tele.on === null) S.tele.on = navigator.globalPrivacyControl !== true;
+  // On by default; can be turned off on privacy.html (footer link "Конфіденційність").
+  if (S.tele.on === null) S.tele.on = true;
   save();
   makeScheduler();
   tele.init(() => S.tele.on);

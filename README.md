@@ -7,7 +7,10 @@
 
 ## Як користуватися
 
-1. Скачайте готовий [`PDR_UA_category_B.apkg`](https://github.com/punjet/PDRAnkiDeck/releases/latest/download/PDR_UA_category_B.apkg)
+Колода є на AnkiWeb: **https://ankiweb.net/shared/info/1194338664** — у Anki
+*Огляд колод → Отримати спільні* або відкрийте посилання й натисніть *Download*.
+
+1. Скачайте колоду з [AnkiWeb](https://ankiweb.net/shared/info/1194338664) або готовий [`PDR_UA_category_B.apkg`](https://github.com/punjet/PDRAnkiDeck/releases/latest/download/PDR_UA_category_B.apkg)
    з [Releases](https://github.com/punjet/PDRAnkiDeck/releases) (або зберіть сам: `python build_deck.py`,
    див. нижче) і імпортуйте в Anki: *Файл → Імпорт*.
 2. У налаштуваннях колоди: *Порядок нових карток → Порядок збирання: «Колода»*,

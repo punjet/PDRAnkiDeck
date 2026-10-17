@@ -5,59 +5,19 @@ parse_official.py + ocr_answers.py + build_dataset.py + finalize_dataset.py.
 Usage: python build_deck.py [data_dir] [out.apkg]
 
 Cards are split into priority tiers (subdecks) and new-card order inside the
-whole deck goes hardest/most-likely first. Priority comes from two HSC MVS
-publications:
-  * ticket layout (hsc.gov.ua 2025-09-16): 10 traffic-rules questions,
-    4 driving safety, 4 category-specific, 2 first aid -> a question from a
-    small pool with many ticket slots is far more likely to show up;
-  * top-5 error topics (hsc.gov.ua 2025-12-18): traffic controller gestures,
-    unregulated intersections, roundabouts, road markings, first aid.
+whole deck goes hardest/most-likely first; see deck_order.py.
 """
 import html
 import json
 import os
-import re
 import sys
 
 import genanki
 
+from deck_order import is_cat_b, ordered, tier_of
+
 DATA = sys.argv[1] if len(sys.argv) > 1 else "data"
 OUT = sys.argv[2] if len(sys.argv) > 2 else "PDR_UA_category_B.apkg"
-
-# Sections 1-39 are common to all categories; 44-47 are the B1/B extras.
-def is_cat_b(section_id):
-    major = int(section_id.split(".")[0])
-    return major <= 39 or 44 <= major <= 47
-
-# HSC top-5 error topics: whole sections plus keyword hits anywhere else.
-HOT_SECTIONS = {"8.1", "8.2", "16.2", "34"}
-HOT_WORDS = re.compile(r"регулювальник|кругов|розмітк")
-
-TIERS = [
-    # (number, deck title, predicate on question)
-    (1, "Додаткові питання кат. B — 4 з 20 у білеті",
-     lambda q, m: 44 <= m <= 47),
-    (2, "Домедична допомога — 2 з 20 у білеті, топ помилок ГСЦ",
-     lambda q, m: q["section"] == "37"),
-    (3, "Основи безпечного водіння — 4 з 20 у білеті",
-     lambda q, m: q["section"] == "35"),
-    (4, "Топ помилок ГСЦ — регулювальник, перехрестя, круг, розмітка",
-     lambda q, m: q["section"] in HOT_SECTIONS
-     or HOT_WORDS.search((q["text"] + " " + " ".join(q["options"])).lower())),
-    (5, "Решта ПДР — ситуації з малюнком", lambda q, m: bool(q.get("images"))),
-    (6, "Решта ПДР — текстові питання", lambda q, m: True),
-]
-
-def tier_of(q):
-    major = int(q["section"].split(".")[0])
-    return next(t for t in TIERS if t[2](q, major))
-
-def difficulty(q):
-    # No public per-question error stats exist, so approximate: more options
-    # means less guessable, a picture means a situation to parse, longer
-    # wording means more conditions to keep in mind.
-    return (len(q["options"]), bool(q.get("images")),
-            len(q["text"]) + sum(len(o) for o in q["options"]))
 
 MODEL_ID = 1729150001
 DECK_ROOT_ID = 1729150200
@@ -115,9 +75,8 @@ if missing_check:
     sys.exit(f"category B answers not verified: {missing_check}")
 sections = {s["id"]: s["name"] for s in data["sections"]}
 
-questions = [q for q in data["questions"] if is_cat_b(q["section"])]
 # Tier first, then hardest first inside the tier; `due` is the new-card position.
-questions.sort(key=lambda q: (tier_of(q)[0], tuple(-x for x in difficulty(q))))
+questions = ordered(data["questions"])
 
 decks = {}
 media = set()

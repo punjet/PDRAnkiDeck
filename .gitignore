@@ -8,3 +8,4 @@ work/
 *.apkg
 .omc/
 data/official_pdf/
+_site/

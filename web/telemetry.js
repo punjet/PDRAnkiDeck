@@ -66,6 +66,17 @@ function send({ table, rows }, keepalive, body = JSON.stringify({ t: table, rows
   return fetch(`${SUPABASE_URL}/rest/v1/rpc/ingest`, { method: "POST", headers, body, keepalive });
 }
 
+// Should these rows leave the queue? Yes when stored, and when the database
+// rejects the data itself (retrying won't help). No on 404/401/429/5xx and on
+// "unknown table": the app was updated before the schema, the rows wait for it.
+async function settled(r) {
+  if (r.ok) return true;
+  if (r.status === 400) {
+    try { return !/unknown table/.test((await r.json()).message || ""); } catch (e) { return true; }
+  }
+  return [409, 413, 422].includes(r.status);
+}
+
 function drop(rows) {
   const sent = new Set(rows.map((r) => r.eid));
   queue = queue.filter((item) => !sent.has(item[1].eid));
@@ -83,17 +94,15 @@ export async function flush(leaving = false) {
       const body = JSON.stringify({ t: b.table, rows: b.rows });
       if (body.length > budget) break;
       budget -= body.length;
-      send(b, true, body).then((r) => { if (r.ok) drop(b.rows); }).catch(() => {});
+      send(b, true, body).then(async (r) => { if (await settled(r)) drop(b.rows); }).catch(() => {});
     }
     return;
   }
   if (flushing) return;
   flushing = true;
   // All batches at once: a page closed mid-way then loses as little as possible.
-  await Promise.all(batches().map((b) => send(b, false).then((r) => {
-    // 400/409/413/422: the database rejected these rows; retrying won't help.
-    // Anything else (404 before the schema exists, 401, 429, 5xx) is retried later.
-    if (r.ok || [400, 409, 413, 422].includes(r.status)) drop(b.rows);
+  await Promise.all(batches().map((b) => send(b, false).then(async (r) => {
+    if (await settled(r)) drop(b.rows);
   }).catch(() => { /* offline or blocked by an extension: retry later */ })));
   flushing = false;
 }

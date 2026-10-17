@@ -3,22 +3,29 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Анонімна статистика — ПДР B</title>
+<title>Конфіденційність — ПДР B</title>
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="style.css">
 <style>
   .doc h2 { margin-top: 8px; }
   .doc ul { margin: 0; padding-left: 20px; }
   .doc li + li { margin-top: 4px; }
+  code.uid { word-break: break-all; font-size: 13px; }
 </style>
 </head>
 <body>
 <div id="app">
-  <div class="top"><a class="btn ghost" href="./">← Назад</a><h1>Анонімна статистика</h1></div>
+  <div class="top"><a class="btn ghost" href="./">← Назад</a><h1>Конфіденційність</h1></div>
   <article class="card stack doc">
     <p>Застосунок безкоштовний і без реклами. Щоб зрозуміти, як люди готуються до іспиту,
       які питання найважчі та що справді допомагає скласти з першої спроби, він збирає
       анонімну статистику навчання.</p>
+
+    <section class="card stack" id="toggleBox" hidden>
+      <div class="row spread"><h3>Анонімна статистика</h3>
+        <button id="teleToggle" style="min-width:96px"></button></div>
+      <p class="note">Ваш ідентифікатор: <code class="uid" id="uid">—</code></p>
+    </section>
 
     <h2>Що збирається</h2>
     <ul>
@@ -39,26 +46,58 @@
     <h2>Що не збирається</h2>
     <ul>
       <li>ім'я, email, телефон чи будь-які облікові дані;</li>
-      <li>IP-адреса, місцезнаходження;</li>
-      <li>браузер, модель пристрою;</li>
+      <li>місцезнаходження, браузер, модель пристрою;</li>
       <li>що ви робите поза цим застосунком, зокрема в інших вкладках.</li>
     </ul>
+    <p class="note">IP-адреса в базу даних не записується. Як і будь-який сервер, постачальник
+      інфраструктури (Supabase) бачить її під час запиту й ненадовго зберігає в технічних журналах.</p>
 
-    <h2>Де зберігається</h2>
-    <p>У базі даних проєкту на Supabase. Сайт може лише додавати записи — прочитати, змінити
-      чи видалити їх через сайт неможливо. Схема бази відкрита:
+    <h2>Хто обробляє і де зберігається</h2>
+    <p>Володілець даних — автор проєкту <a href="https://github.com/punjet/PDRAnkiDeck">PDRAnkiDeck</a>
+      (GitHub: punjet). Дані зберігаються в базі на Supabase (розпорядник). Сайт може лише додавати
+      записи — прочитати, змінити чи видалити їх через сайт неможливо. Схема бази відкрита:
       <a href="https://github.com/punjet/PDRAnkiDeck/blob/main/supabase/schema.sql">supabase/schema.sql</a>.</p>
 
-    <h2>Навіщо</h2>
-    <p>Для аналізу навчання і статті про підготовку до іспиту. Дані можуть бути опубліковані
-      у відкритому вигляді — лише в анонімній чи агрегованій формі.</p>
+    <h2>Навіщо і на якій підставі</h2>
+    <p>Для аналізу навчання, покращення застосунку і статті про підготовку до іспиту — це законний
+      інтерес проєкту (ст. 11 Закону України «Про захист персональних даних»). Дані не продаються
+      і не використовуються для реклами. Опубліковані можуть бути лише в анонімній чи агрегованій формі.</p>
 
-    <h2>Як вимкнути</h2>
-    <p>Налаштування → «Анонімна статистика». Після вимкнення нічого не надсилається, а ще не
-      надіслані дані видаляються з пристрою. Якщо в браузері ввімкнено Global Privacy Control,
-      збір вимкнено з самого початку.</p>
+    <h2>Скільки зберігається</h2>
+    <p>До 3 років з моменту запису, після чого видаляються.</p>
+
+    <h2>Ваші права</h2>
+    <p>Ви можете будь-коли вимкнути збір перемикачем вище — після цього нічого не надсилається, а ще
+      не надіслані дані видаляються з пристрою. Щоб дізнатися, які дані про вас є, або видалити їх,
+      напишіть у <a href="https://github.com/punjet/PDRAnkiDeck/issues">GitHub Issues</a> і вкажіть
+      ваш ідентифікатор. Ви також маєте право звернутися до Уповноваженого Верховної Ради України
+      з прав людини.</p>
   </article>
   <footer><p><a href="./">Повернутися до застосунку</a></p></footer>
 </div>
+<script type="module">
+  import { configured, clearQueue } from "./telemetry.js";
+  const KEY = "pdr-b-v1";
+  const box = document.getElementById("toggleBox");
+  const btn = document.getElementById("teleToggle");
+  function read() { try { return JSON.parse(localStorage.getItem(KEY)) || null; } catch (e) { return null; } }
+  function show() {
+    const s = read();
+    if (!configured || !s || !s.tele) return;   // app not opened yet in this browser
+    box.hidden = false;
+    document.getElementById("uid").textContent = s.tele.uid || "—";
+    btn.textContent = s.tele.on ? "Увімкнено" : "Вимкнено";
+    btn.className = s.tele.on ? "primary" : "";
+  }
+  btn.addEventListener("click", () => {
+    const s = read();
+    if (!s || !s.tele) return;
+    s.tele.on = !s.tele.on;
+    try { localStorage.setItem(KEY, JSON.stringify(s)); } catch (e) { /* storage blocked */ }
+    if (!s.tele.on) clearQueue();
+    show();
+  });
+  show();
+</script>
 </body>
 </html>

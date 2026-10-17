@@ -464,7 +464,8 @@ function renderHome() {
     <p>${esc(DB.source)} · ${total} питань</p>
     <p><a href="https://github.com/punjet/PDRAnkiDeck">GitHub</a> ·
        <a href="https://ankiweb.net/shared/info/1194338664">Колода Anki</a> ·
-       <a href="https://github.com/punjet/PDRAnkiDeck/blob/main/NOTICE">Ліцензія CC BY-NC-SA 4.0</a></p>
+       <a href="https://github.com/punjet/PDRAnkiDeck/blob/main/NOTICE">Ліцензія CC BY-NC-SA 4.0</a> ·
+       <a href="privacy.html">Конфіденційність</a></p>
     <p>Неофіційний проєкт. Тексти питань і малюнки належать ГСЦ МВС України.</p>
   </footer>`);
 }

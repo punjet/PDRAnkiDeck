@@ -7,8 +7,9 @@
 
 ## Як користуватися
 
-1. Зберіть колоду (`python build_deck.py`, див. нижче) або візьміть готовий
-   `PDR_UA_category_B.apkg` і імпортуйте в Anki: *Файл → Імпорт*.
+1. Скачайте готовий [`PDR_UA_category_B.apkg`](https://github.com/punjet/PDRAnkiDeck/releases/latest/download/PDR_UA_category_B.apkg)
+   з [Releases](https://github.com/punjet/PDRAnkiDeck/releases) (або зберіть сам: `python build_deck.py`,
+   див. нижче) і імпортуйте в Anki: *Файл → Імпорт*.
 2. У налаштуваннях колоди: *Порядок нових карток → Порядок збирання: «Колода»*,
    інакше Anki перемішає пріоритети.
 3. Темп: за 2 тижні — ~175 нових карток на день (2–2,5 год), за 1 тиждень —

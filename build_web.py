@@ -9,6 +9,7 @@ Needs nothing beyond the standard library, so CI can run it as is.
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 
@@ -96,13 +97,33 @@ expl_path = os.path.join(DATA, "explanations.json")
 EXPL = {}
 if APP_EXPLAIN and os.path.exists(expl_path):
     raw = json.load(open(expl_path, encoding="utf-8"))
+    opts_of = {e["id"]: e["o"] for e in out}
+    VARIANT = re.compile(r"(варіант\w*)\s*№?\s*(\d)\b", re.I)
+
+    def by_text(text, opts):
+        # The app shuffles the options, so "варіант 2" may point at another one on screen:
+        # name the option by its text instead. The static pages keep the numbers (no shuffle).
+        def sub(m):
+            n = int(m.group(2))
+            if not 1 <= n <= len(opts):
+                return m.group(0)
+            o = opts[n - 1].rstrip(".")
+            return f"{m.group(1)} «{o if len(o) <= 60 else o[:59].rsplit(' ', 1)[0] + '…'}»"
+        return VARIANT.sub(sub, text)
+
     for qid, e in raw.items():
         if e.get("status") != "ok" or qid not in known_ids:
             continue
+        o = opts_of[qid]
         EXPL[qid] = {k: e[k] for k in ("text", "steps", "trap", "what_if", "tip") if e.get(k)}
+        for k in ("text", "trap", "what_if", "tip"):
+            if k in EXPL[qid]:
+                EXPL[qid][k] = by_text(EXPL[qid][k], o)
+        if "steps" in EXPL[qid]:
+            EXPL[qid]["steps"] = [by_text(x, o) for x in EXPL[qid]["steps"]]
         # wrong: base option number (1-based) -> why it is wrong; the app shows it by option text.
         if e.get("wrong"):
-            EXPL[qid]["wrong"] = {str(int(k) - 1): v for k, v in e["wrong"].items()}
+            EXPL[qid]["wrong"] = {str(int(k) - 1): by_text(v, o) for k, v in e["wrong"].items()}
         if e.get("rules"):
             EXPL[qid]["rules"] = [[k, f"pdr/{build_seo.pdr_section_of(k)}/#p{k}"] for k in e["rules"]]
     for e in out:

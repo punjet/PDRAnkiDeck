@@ -199,3 +199,57 @@ from exams;
 -- 18. Questions people quit the mock exam on.
 select quit_qid, count(*) as quits, round(avg(errors), 2) as avg_errors_before
 from exams where abandoned group by quit_qid order by quits desc limit 20;
+
+-- ===== Motivation features (v1.3, table events + pings.streak/ready_pct/exam_in) =====
+
+-- 19. Did v1.3 help? Returns and session length by app version (people who started on it).
+with starters as (select distinct on (uid) uid, app_ver from pings where kind = 'start' order by uid, created_at),
+d as (select uid, count(distinct day_n) days, max(day_n) last_day from pings group by uid),
+s as (select uid, sid, max(active_s) active_s from pings group by uid, sid)
+select f.app_ver, count(distinct f.uid) people,
+       round(avg(d.days), 2) as active_days,
+       round(100.0 * avg((d.last_day >= 1)::int), 1) as came_back_next_day_pct,
+       round(100.0 * avg((d.last_day >= 7)::int), 1) as active_after_week_pct,
+       round((select percentile_cont(0.5) within group (order by active_s) / 60
+              from s where s.uid in (select uid from starters f2 where f2.app_ver = f.app_ver))::numeric, 1) as median_session_min
+from starters f join d using (uid) group by f.app_ver order by f.app_ver;
+
+-- 20. Feature use: how many people tapped each, and how many came back the day after.
+with e as (select uid, kind, min(day_n) day_n from events group by uid, kind),
+p as (select uid, day_n from pings group by uid, day_n)
+select e.kind, count(*) as people,
+       round(100.0 * avg((exists (select 1 from p where p.uid = e.uid and p.day_n = e.day_n + 1))::int), 1) as active_next_day_pct
+from e group by e.kind order by people desc;
+
+-- 21. Streak length at session start: how long streaks get, and where they break.
+select streak, count(distinct uid) as people
+from pings where kind = 'start' and streak is not null and streak <= 30
+group by streak order by streak;
+
+-- 22. Pass chance shown in the app vs the real exam result (is the estimate honest?).
+with last_ready as (
+  select distinct on (uid) uid, ready_pct from pings where ready_pct is not null order by uid, created_at desc
+)
+select width_bucket(ready_pct, 0, 100, 5) as bucket, min(ready_pct) lo, max(ready_pct) hi, count(*) people,
+       round(100.0 * avg((o.result = 'passed_first')::int), 1) as passed_first_pct
+from last_ready r join outcomes o using (uid)
+where o.result <> 'not_yet' group by 1 order by 1;
+
+-- 23. Viral loop: people who came from a shared link, by where it was shared from.
+select first_src, count(distinct uid) as people
+from pings where kind = 'start' and first_src like 'share_%' group by 1 order by 2 desc;
+
+-- ===== Question order and option shuffling (v1.4) =====
+
+-- 24. Does a fixed option order inflate scores? Review accuracy in study, shuffled vs not,
+--     on the same questions (only questions that can be shuffled; null = before v1.4).
+select coalesce(shuffled::text, 'before_v1.4') as shuffled, count(*) answers,
+       round(100.0 * avg(correct::int), 1) as correct_pct
+from answers where mode = 'study' and state = 2
+  and qid in (select qid from answers where shuffled) group by 1;
+
+-- 25. Auto-advance: share of right answers graded by the timer, and answers per minute of session.
+select app_ver, round(100.0 * avg(auto_rated::int) filter (where correct), 1) as auto_pct,
+       round(count(*)::numeric / nullif((select sum(m) from (select max(active_s) / 60.0 m from pings p
+         where p.app_ver = a.app_ver group by sid) x), 0), 2) as answers_per_min
+from answers a where mode = 'study' group by app_ver order by app_ver;

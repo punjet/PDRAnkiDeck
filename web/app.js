@@ -4,10 +4,11 @@
 import { fsrs, generatorParameters, createEmptyCard, Rating, State }
   from "./vendor/ts-fsrs-5.4.2.mjs";
 import * as tele from "./telemetry.js";
+import MiniSearch from "./vendor/minisearch-7.2.0.mjs";
 
-const APP_VER = "1.2";
+const APP_VER = "1.4";
 const STORE_KEY = "pdr-b-v1";
-const IMG_CACHE = "pdr-img-v1";
+const IMG_CACHE = "pdr-img-v2";
 const DAY_START_HOUR = 4;          // Anki's default "next day starts at"
 const LEARN_AHEAD_MS = 20 * 60e3;  // Anki's default learn-ahead limit
 const EXAM_MINUTES = 20;
@@ -27,12 +28,24 @@ let view = { name: "home" };
 let timerHandle = null;
 
 // ---------- storage ----------
+function newDay(key) {
+  // ready0: pass chance at the first look today, to show today's gain.
+  return { key, newDone: 0, reviewsDone: 0, answers: 0, correct: 0, bonus: 0, ready0: null, goalDone: false };
+}
+
 function defaultState() {
   return {
     settings: { preset: "two", ...PRESETS.two },
     cards: {},        // id -> ts-fsrs card (dates as ISO strings)
     logs: [],         // [id, unix seconds, rating, state before] for a later optimizer
-    day: { key: "", newDone: 0, reviewsDone: 0 },
+    day: newDay(""),
+    days: {},         // day index -> answers that day (any mode): streak and activity strip
+    best: { combo: 0 },
+    plan: { examDate: null, remindAt: null },   // "YYYY-MM-DD", "HH:MM"
+    ui: { installLaterAt: 0 },
+    // shuffle: options in a new order each time, like the HSC exam; auto: a right answer
+    // is graded "Добре" by itself after a moment; motion: animations.
+    prefs: { shuffle: true, auto: true, motion: true },
     wrong: {},        // id -> unix ms of the last wrong answer (study or exam)
     exams: [],        // {at, errors, total, passed}
     firstSeen: null,  // unix ms of the first launch: "day of preparation" for stats
@@ -83,10 +96,11 @@ function dayEnd(t = Date.now()) {
 }
 function rollDay() {
   const k = dayKey();
-  if (S.day.key !== k) S.day = { key: k, newDone: 0, reviewsDone: 0 };
+  if (S.day.key !== k) S.day = newDay(k);
 }
 
 // ---------- queue ----------
+const newLeft = () => S.settings.newPerDay + (S.day.bonus || 0) - S.day.newDone;
 const due = (c) => new Date(c.due).getTime();
 const isLearning = (c) => c.state === State.Learning || c.state === State.Relearning;
 
@@ -99,29 +113,43 @@ function queueCounts() {
     else if (c.state === State.Review && due(c) <= end) review++;
   }
   const unseen = DB.questions.length - Object.keys(S.cards).length;
-  const fresh = Math.max(0, Math.min(unseen, S.settings.newPerDay - S.day.newDone));
+  const fresh = Math.max(0, Math.min(unseen, newLeft()));
   return { learn, review, fresh };
 }
 
-function nextCard() {
+// Order within the day:
+//  1. learning steps that are due (short-term memory first, as in Anki);
+//  2. due reviews by descending retrievability: the ones most likely remembered go first.
+//     FSRS simulations show this keeps the most knowledge when a session is cut short
+//     (ankitects/anki#3460), and a run of right answers early keeps people going;
+//  3. new cards spread evenly between the reviews instead of after all of them, so
+//     neither a wall of reviews nor a wall of new cards. `skip` lets the caller exclude
+//     the card just shown so the same question never comes twice in a row.
+function nextCard(skip = null) {
   rollDay();
-  const now = Date.now(), end = dayEnd();
-  let learnNow = null, learnSoon = null, rev = null;
+  const now = Date.now(), end = dayEnd(), nowD = new Date(now);
+  let learnNow = null, learnSoon = null, rev = null, revR = -1, revN = 0;
   for (const [id, c] of Object.entries(S.cards)) {
+    if (id === skip) continue;
     if (isLearning(c)) {
       const t = due(c);
       if (t <= now) { if (!learnNow || t < due(S.cards[learnNow])) learnNow = id; }
       else if (!learnSoon || t < due(S.cards[learnSoon])) learnSoon = id;
     } else if (c.state === State.Review && due(c) <= end) {
-      if (!rev || due(c) < due(S.cards[rev])) rev = id;
+      revN++;
+      const r = scheduler.get_retrievability(c, nowD, false);
+      if (r > revR) { rev = id; revR = r; }
     }
   }
   if (learnNow) return { id: learnNow, kind: "learn" };
-  if (rev) return { id: rev, kind: "review" };
-  if (S.settings.newPerDay - S.day.newDone > 0) {
-    const q = DB.questions.find((q) => !S.cards[q.id]);
-    if (q) return { id: q.id, kind: "new" };
+  const fresh = newLeft() > 0 ? DB.questions.find((q) => !S.cards[q.id]) : null;
+  if (rev && fresh) {
+    const left = Math.min(newLeft(), DB.questions.length - Object.keys(S.cards).length);
+    const every = Math.max(2, Math.round((revN + left) / left));   // one new card per `every` answers
+    if ((S.day.answers || 0) % every === every - 1) return { id: fresh.id, kind: "new" };
   }
+  if (rev) return { id: rev, kind: "review" };
+  if (fresh) return { id: fresh.id, kind: "new" };
   if (learnSoon && due(S.cards[learnSoon]) <= now + LEARN_AHEAD_MS) return { id: learnSoon, kind: "learn" };
   return { id: null, nextAt: learnSoon ? due(S.cards[learnSoon]) : null };
 }
@@ -137,6 +165,8 @@ function rate(id, rating) {
   if (wasNew) S.day.newDone++;
   else if (before.state === State.Review) S.day.reviewsDone++;
   if (rating === Rating.Again) S.wrong[id] = Date.now();
+  S.day.answers = (S.day.answers || 0) + 1;
+  if (rating !== Rating.Again) S.day.correct = (S.day.correct || 0) + 1;
   save();
   return undo;
 }
@@ -212,9 +242,9 @@ function readSource() {
     const host = document.referrer ? new URL(document.referrer).hostname.replace(/^www\./, "") : "";
     sess.ref = host && host !== location.hostname ? host.slice(0, 64) : null;
   } catch (e) { sess.ref = null; }
-  if (q.has("src") || q.has("utm_source") || q.has("utm_campaign") || q.has("utm_medium")) {
+  if (q.has("src") || q.has("utm_source") || q.has("utm_campaign") || q.has("utm_medium") || q.has("go")) {
     // Drop the tag from the address bar so a shared or bookmarked link does not reuse it.
-    for (const k of ["src", "utm_source", "utm_campaign", "utm_medium", "utm_content", "utm_term"]) q.delete(k);
+    for (const k of ["src", "utm_source", "utm_campaign", "utm_medium", "utm_content", "utm_term", "go"]) q.delete(k);
     const rest = q.toString();
     history.replaceState(null, "", location.pathname + (rest ? `?${rest}` : "") + location.hash);
   }
@@ -224,6 +254,7 @@ function currentQid() {
   if (view.name === "study") return view.current?.id || null;
   if (view.name === "drill") return view.queue?.[0] || null;
   if (view.name === "exam") return view.exam ? view.exam.ids[view.exam.i] : null;
+  if (view.name === "practice") return view.ids?.[view.i] || null;
   return null;
 }
 
@@ -237,6 +268,9 @@ function ping(kind) {
     src: start ? sess.src : null,
     first_src: start ? S.tele.firstSrc : null,
     ref: start ? sess.ref : null,
+    streak: start ? streakInfo().n : null,
+    ready_pct: start && DB ? passChance() : null,
+    exam_in: start ? examDaysLeft() : null,
     day_n: dayN(), local_hour: new Date().getHours(), device: device(),
     standalone: matchMedia("(display-mode: standalone)").matches || navigator.standalone === true,
     app_ver: APP_VER,
@@ -298,7 +332,206 @@ function progressCounts() {
   return { known, started };
 }
 
-function trackAnswer(q, mode, chosen, rtMs, rating = null, before = null) {
+// ---------- motivation: streak, daily goal, pass chance, reminders ----------
+// Calendar day index in local time, with the day starting at DAY_START_HOUR like the queue.
+function dayIdx(t = Date.now()) {
+  const d = new Date(t - DAY_START_HOUR * 3600e3);
+  return Math.round(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / 864e5);
+}
+
+// Progress saved before v1.3 has no S.days: rebuild it from the review log and exams.
+function seedDays() {
+  if (Object.keys(S.days).length) return;
+  for (const l of S.logs) { const k = dayIdx(l[1] * 1000); S.days[k] = (S.days[k] || 0) + 1; }
+  for (const e of S.exams) { const k = dayIdx(e.at); S.days[k] = (S.days[k] || 0) + e.total; }
+}
+
+function markActive() {   // true for the first answer of the day
+  const k = dayIdx();
+  const first = !S.days[k];
+  S.days[k] = (S.days[k] || 0) + 1;
+  return first;
+}
+
+function streakInfo() {
+  const today = dayIdx();
+  const doneToday = !!S.days[today];
+  let d = doneToday ? today : today - 1, n = 0;
+  while (S.days[d]) { n++; d--; }
+  return { n, doneToday };
+}
+
+function weekStrip() {
+  const today = dayIdx();
+  return Array.from({ length: 7 }, (_, i) => {
+    const k = today - 6 + i, n = S.days[k] || 0;
+    const d = new Date(k * 864e5);
+    const wd = d.toLocaleDateString("uk-UA", { weekday: "short", timeZone: "UTC" });
+    return `<span class="${n ? "on" : ""} ${k === today ? "today" : ""}" title="${n} ${plural(n, "відповідь", "відповіді", "відповідей")}">
+      <i>${n ? "✓" : ""}</i><small>${wd}</small></span>`;
+  }).join("");
+}
+
+// Chance to pass a real ticket right now (<= EXAM_MAX_ERRORS errors), from FSRS memory.
+// A studied question is answered right if remembered (FSRS retrievability) or, if not, guessed;
+// an unseen one only by guessing. The guess rate is this person's own first-try accuracy.
+// Each ticket slot draws from its block, so its chance is the block average; the error
+// count over the 20 slots is then a sum of independent Bernoullis.
+function passChance() {
+  let firstN = 0, firstOk = 0;
+  for (const l of S.logs) if (l[3] === State.New) { firstN++; if (l[2] !== Rating.Again) firstOk++; }
+  const guess = (firstOk + 10) / (firstN + 20);   // prior: 50 % worth 20 answers
+  const now = new Date(), sum = {}, cnt = {};
+  for (const q of DB.questions) {
+    const c = S.cards[q.id];
+    let p = guess;
+    if (c && c.state !== State.New) {
+      const r = scheduler.get_retrievability(c, now, false);
+      p = r + (1 - r) * guess;
+    }
+    sum[q.block] = (sum[q.block] || 0) + p;
+    cnt[q.block] = (cnt[q.block] || 0) + 1;
+  }
+  let dist = Array(EXAM_MAX_ERRORS + 2).fill(0); dist[0] = 1;   // last cell: too many errors
+  for (const { block, count } of DB.ticket) {
+    const p = cnt[block] ? sum[block] / cnt[block] : guess;
+    for (let k = 0; k < count; k++) {
+      const next = dist.map(() => 0);
+      dist.forEach((v, e) => { next[e] += v * p; next[Math.min(e + 1, dist.length - 1)] += v * (1 - p); });
+      dist = next;
+    }
+  }
+  return Math.round(100 * dist.slice(0, -1).reduce((a, b) => a + b, 0));
+}
+
+function readyNow() {
+  const pct = passChance();
+  if (S.day.ready0 === null || S.day.ready0 === undefined) { S.day.ready0 = pct; save(); }
+  return { pct, gain: pct - S.day.ready0 };
+}
+
+function readyHtml({ pct, gain }) {
+  const color = pct >= 90 ? "var(--ok)" : pct >= 50 ? "var(--warn)" : "var(--bad)";
+  return `
+    <div class="ready">
+      <div class="row spread"><span>Шанс скласти іспит зараз</span>
+        <b style="color:${color}">${pct}%${gain > 0 ? ` <small class="gain">+${gain} сьогодні</small>` : ""}</b></div>
+      <div class="bar">${barSpan("ready", pct, "", `background:${color}`)}</div>
+    </div>`;
+}
+
+function examDaysLeft() {
+  if (!S.plan.examDate) return null;
+  const exam = new Date(`${S.plan.examDate}T00:00`);
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  return Math.round((exam - today) / 864e5);
+}
+
+function todayGoal() {
+  const { learn, review, fresh } = queueCounts();
+  const done = S.day.answers || 0, left = learn + review + fresh;
+  return { done, left, pct: done + left ? Math.round(100 * done / (done + left)) : 0 };
+}
+
+function siteUrl() {
+  const c = document.querySelector('link[rel="canonical"]')?.href;
+  return c && !c.includes("__SITE__") ? c : location.origin + location.pathname.replace(/index\.html$/, "");
+}
+
+async function shareApp(where, text) {
+  const url = `${siteUrl()}?src=share_${where}`;
+  try {
+    if (navigator.share) {
+      await navigator.share({ title: "Тести ПДР — категорія B", text, url });
+      ev("share", where, 1);
+    } else {
+      await navigator.clipboard.writeText(`${text} ${url}`);
+      ev("share", where, 0);
+      alert("Посилання скопійовано — надішліть його другу.");
+    }
+  } catch (e) { /* share sheet closed */ }
+}
+
+// Daily reminder as a calendar file: works with no server and no notification permission.
+function downloadReminder(hhmm) {
+  const [hh, mm] = hhmm.split(":").map(Number);
+  const start = new Date(); start.setHours(hh, mm, 0, 0);
+  if (start <= new Date()) start.setDate(start.getDate() + 1);
+  const left = examDaysLeft();
+  const count = Math.min(60, left && left > 0 ? left : 14);
+  const p2 = (n) => String(n).padStart(2, "0");
+  const local = (d) => `${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}T${p2(d.getHours())}${p2(d.getMinutes())}00`;
+  const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+/, "");
+  const url = `${siteUrl()}?src=ics`;
+  const ics = [
+    "BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//PDRAnkiDeck//UA", "CALSCALE:GREGORIAN",
+    "BEGIN:VEVENT", `UID:${crypto.randomUUID()}@pdr-b`, `DTSTAMP:${stamp}`,
+    `DTSTART:${local(start)}`, "DURATION:PT30M", `RRULE:FREQ=DAILY;COUNT=${count}`,
+    "SUMMARY:🚗 ПДР: повторення на сьогодні",
+    `DESCRIPTION:Не втрачайте серію днів. ${url}`, `URL:${url}`,
+    "BEGIN:VALARM", "ACTION:DISPLAY", "TRIGGER:PT0M", "DESCRIPTION:Час повторити ПДР", "END:VALARM",
+    "END:VEVENT", "END:VCALENDAR", "",
+  ].join("\r\n");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([ics], { type: "text/calendar" }));
+  a.download = "pdr-nahaduvannia.ics";
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  S.plan.remindAt = hhmm; save();
+  ev("ics", hhmm.replace(":", ""), count);
+}
+
+// Install to home screen: Chrome/Android hands over a prompt; iOS needs manual steps.
+let installEvt = null, installShown = false;
+const isStandalone = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+const isIOS = () => /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+window.addEventListener("beforeinstallprompt", (e) => {
+  e.preventDefault();
+  installEvt = e;
+  if (DB && view.name === "home") render();
+});
+window.addEventListener("appinstalled", () => { installEvt = null; if (S) ev("install_done"); });
+
+function installHtml() {
+  if (isStandalone() || (!installEvt && !isIOS())) return "";
+  if (S.logs.length < 30 || Date.now() - S.ui.installLaterAt < 3 * 864e5) return "";
+  if (!installShown) { installShown = true; ev("install_shown", installEvt ? "prompt" : "ios"); }
+  return `
+  <section class="card stack">
+    <h2>📲 Встановіть на телефон</h2>
+    <p class="muted small">Відкривається з головного екрана одним дотиком і працює без інтернету.${installEvt ? "" :
+      " Натисніть «Поділитися» внизу Safari → «На початковий екран»."}</p>
+    <div class="row">
+      ${installEvt ? `<button class="primary grow" data-act="install">Встановити</button>` : ""}
+      <button class="grow" data-act="install-later">Не зараз</button>
+    </div>
+  </section>`;
+}
+
+// Number of cards waiting: on the installed app icon and in the tab title while away.
+const BASE_TITLE = document.title;
+function updateBadge(hidden = document.visibilityState === "hidden") {
+  if (!S || !DB) return;
+  const { learn, review, fresh } = queueCounts();
+  const n = learn + review + fresh;
+  try {
+    if ("setAppBadge" in navigator) (n ? navigator.setAppBadge(n) : navigator.clearAppBadge()).catch(() => {});
+  } catch (e) { /* not supported */ }
+  document.title = hidden && n ? `(${n}) ${BASE_TITLE}` : BASE_TITLE;
+}
+
+function ev(kind, detail = null, n = null) {
+  tele.track("events", {
+    uid: S.tele.uid, sid: SID, kind, detail: detail === null ? null : cleanTag(String(detail)), n,
+    streak: streakInfo().n, day_n: dayN(), local_hour: new Date().getHours(), device: device(),
+    standalone: isStandalone(), app_ver: APP_VER,
+  });
+}
+
+let combo = 0;   // right answers in a row this session (study and drill)
+let comboRecord = false;
+
+function trackAnswer(q, mode, chosen, rtMs, rating = null, before = null, extra = {}) {
   sess.answers++;
   tele.track("answers", {
     uid: S.tele.uid, sid: SID, qid: q.id, mode, chosen, correct: chosen === q.a,
@@ -317,6 +550,7 @@ function trackAnswer(q, mode, chosen, rtMs, rating = null, before = null) {
     device: device(),
     standalone: matchMedia("(display-mode: standalone)").matches || navigator.standalone === true,
     app_ver: APP_VER,
+    ...extra,
   });
 }
 
@@ -324,12 +558,116 @@ function trackAnswer(q, mode, chosen, rtMs, rating = null, before = null) {
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
-function h(html) { app.innerHTML = html; window.scrollTo(0, 0); }
+function h(html) {
+  app.innerHTML = html;
+  window.scrollTo(0, 0);
+  // Bars are drawn at their previous width, then grow to the new one.
+  requestAnimationFrame(() => requestAnimationFrame(() =>
+    app.querySelectorAll("[data-w], [data-off]").forEach((el) => {
+      if (el.dataset.w) el.style.width = `${el.dataset.w}%`;
+      else el.style.strokeDashoffset = el.dataset.off;
+    })));
+}
+
+const lastBar = {};
+function barSpan(key, pct, cls = "", style = "") {
+  const from = lastBar[key] ?? pct;
+  lastBar[key] = pct;
+  return `<span class="${cls}" data-w="${pct}" style="width:${from}%;${style}"></span>`;
+}
+
+const motionOn = () => S.prefs.motion && !matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+// Screen changes cross-fade; the next question slides in (View Transitions, where supported).
+function vt(fn, kind = "nav") {
+  if (!document.startViewTransition || !motionOn()) return fn();
+  const root = document.documentElement;
+  root.dataset.vt = kind;
+  const t = document.startViewTransition(fn);
+  t.finished.finally(() => { if (root.dataset.vt === kind) delete root.dataset.vt; });
+}
 
 function go(v) {
   if (timerHandle) { clearInterval(timerHandle); timerHandle = null; }
+  cancelAuto();
   view = v;
-  render();
+  vt(render);
+}
+
+// ---- auto-advance after a right answer ----
+const AUTO_MS = 1400;
+let autoTimer = null;
+function armAuto(fn) {
+  if (autoTimer) clearTimeout(autoTimer);
+  const st = view.state;
+  autoTimer = setTimeout(() => {
+    autoTimer = null;
+    if (view.state === st && document.visibilityState === "visible") fn();
+  }, AUTO_MS);
+}
+function cancelAuto() {
+  if (autoTimer) { clearTimeout(autoTimer); autoTimer = null; }
+  if (view?.state?.auto) {
+    view.state.auto = false;
+    app.querySelectorAll(".auto").forEach((b) => b.classList.remove("auto"));
+  }
+}
+
+// ---- small rewards ----
+function toast(text) {
+  const el = document.createElement("div");
+  el.className = "toast";
+  el.setAttribute("role", "status");
+  el.textContent = text;
+  document.body.appendChild(el);
+  setTimeout(() => el.classList.add("out"), 2400);
+  setTimeout(() => el.remove(), 2900);
+}
+
+function confetti() {
+  if (!motionOn()) return;
+  const c = document.createElement("canvas");
+  c.className = "confetti";
+  const dpr = Math.min(2, devicePixelRatio || 1);
+  c.width = innerWidth * dpr; c.height = innerHeight * dpr;
+  document.body.appendChild(c);
+  const g = c.getContext("2d");
+  g.scale(dpr, dpr);
+  const colors = ["#1d4ed8", "#157a3c", "#f0a53a", "#c0262d", "#5b8cff", "#4cc47d"];
+  const parts = Array.from({ length: 110 }, () => ({
+    x: innerWidth / 2, y: innerHeight * 0.35,
+    vx: (Math.random() - 0.5) * 14, vy: -Math.random() * 13 - 4,
+    r: Math.random() * Math.PI, vr: (Math.random() - 0.5) * 0.4,
+    w: 6 + Math.random() * 6, h: 3 + Math.random() * 4, col: colors[Math.floor(Math.random() * colors.length)],
+  }));
+  const t0 = performance.now();
+  (function frame(t) {
+    const k = (t - t0) / 1800;
+    g.clearRect(0, 0, innerWidth, innerHeight);
+    g.globalAlpha = Math.max(0, 1 - k * k);
+    for (const p of parts) {
+      p.vy += 0.35; p.vx *= 0.99; p.x += p.vx; p.y += p.vy; p.r += p.vr;
+      g.save(); g.translate(p.x, p.y); g.rotate(p.r); g.fillStyle = p.col;
+      g.fillRect(-p.w / 2, -p.h / 2, p.w, p.h); g.restore();
+    }
+    if (k < 1) requestAnimationFrame(frame); else c.remove();
+  })(t0);
+}
+
+const MILESTONES = [50, 100, 250, 500, 1000, 1500];
+function checkMilestone() {
+  const { known } = progressCounts();
+  const hit = [...MILESTONES, DB.questions.length].filter((m) => known >= m).pop();
+  if (hit && hit > (S.best.milestone || 0)) {
+    S.best.milestone = hit; save();
+    toast(hit === DB.questions.length ? "🏆 Усі питання вивчено!" : `🏆 ${hit} питань вивчено!`);
+    confetti();
+  }
+}
+
+function streakToast() {
+  const n = streakInfo().n;
+  toast(n >= 2 ? `🔥 ${n} ${plural(n, "день", "дні", "днів")} поспіль — серію продовжено!` : "🔥 Перший день серії. Повертайтеся завтра!");
 }
 
 function shuffle(a) {
@@ -349,15 +687,34 @@ function plural(n, one, few, many) {
 
 function questionHtml(q) {
   const imgs = q.img.map((n) =>
-    `<img class="qimg" src="img/${esc(n)}" alt="Ілюстрація до питання" loading="eager" decoding="async">`).join("");
+    `<img class="qimg" src="img/${esc(n)}" alt="${esc(`Малюнок до питання ${q.num}: ${q.t.slice(0, 110)}`)}" loading="eager" decoding="async">`).join("");
   return `
-    <div class="qsec">${esc(q.sec)} · №${q.num}</div>
+    <div class="qsec">${esc(q.sec)} · №${q.num}${(S.cards[q.id]?.lapses || 0) >= 3
+      ? ` <span class="leech" title="Скільки разів ви забули це питання">⚠️ складне · ${S.cards[q.id].lapses}×</span>` : ""}</div>
     <div class="qtext">${esc(q.t)}</div>
     ${imgs}`;
 }
 
-function optionsHtml(q, { chosen = null, reveal = false, selected = null } = {}) {
-  return `<ul class="opts">${q.o.map((o, i) => {
+// The HSC exam shows the options in a new order every time, so a fixed order here
+// would teach "the answer is 3" instead of the answer. Not shuffled: questions whose
+// options cite other options by number ("Відповіді 1 і 2", 13 % of the base). Kept in
+// place: summary options like "Усе вищеперелічене" / "Жодного з них".
+const NUM_REF = /(відповід|варіант)[^.]*\d/i;
+const SUMMARY = /^(усі|всі|все|усе|жод\S*|обидва|обидві)\b.*(відповід|варіант|перелічен|перерахован|наведен|вище|них)|вищеперелічен|вищеперерахован|вищенаведен/i;
+function makePerm(q) {
+  const ids = q.o.map((_, i) => i);
+  if (!S.prefs.shuffle || q.o.some((o) => NUM_REF.test(o))) return ids;
+  const free = ids.filter((i) => !SUMMARY.test(q.o[i]));
+  const mixed = shuffle([...free]);
+  return ids.map((i) => (free.includes(i) ? mixed.shift() : i));
+}
+const isShuffled = (perm) => perm.some((v, i) => v !== i);
+const shownNo = (perm, i) => (perm ? perm.indexOf(i) : i) + 1;   // number on screen for option i
+
+// data-opt carries the option's index in the base; the number shown is its place on screen.
+function optionsHtml(q, { chosen = null, reveal = false, selected = null, perm = null, anim = false } = {}) {
+  const order = perm || q.o.map((_, i) => i);
+  return `<ul class="opts ${anim ? "just" : ""}">${order.map((i, pos) => {
     let cls = "opt";
     if (reveal) {
       if (i === q.a) cls += " right";
@@ -365,14 +722,21 @@ function optionsHtml(q, { chosen = null, reveal = false, selected = null } = {})
       else cls += " dim";
     } else if (i === selected) cls += " sel";
     return `<li><button class="${cls}" data-opt="${i}" ${reveal ? "disabled" : ""}>
-      <span class="n">${i + 1}</span><span>${esc(o)}</span></button></li>`;
+      <span class="n">${pos + 1}</span><span>${esc(q.o[i])}</span></button></li>`;
   }).join("")}</ul>`;
 }
 
 // ---------- views ----------
+const about = document.getElementById("about");
+
 function render() {
+  // The static SEO text under the app belongs to the home screen only.
+  const home = view.name === "home";
+  if (about) about.hidden = !home;
+  app.classList.toggle("with-about", home && !!about);
   ({ home: renderHome, study: renderStudy, exam: renderExam, result: renderResult,
-     drill: renderDrill, settings: renderSettings })[view.name]();
+     drill: renderDrill, settings: renderSettings,
+     search: renderSearch, topic: renderTopic, practice: renderPractice })[view.name]();
 }
 
 function tierStats() {
@@ -387,6 +751,25 @@ function tierStats() {
   return rows;
 }
 
+const GEAR = `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`;
+
+// Today's goal as a ring: drawn at its previous value, then turns to the new one (see h()).
+function ringHtml(pct, done) {
+  const C = 2 * Math.PI * 32;
+  const off = (p) => (C * (1 - p / 100)).toFixed(1);
+  const from = lastBar.ring ?? pct;
+  lastBar.ring = pct;
+  return `
+    <div class="ring" role="img" aria-label="Ціль на сьогодні: ${pct}%">
+      <svg viewBox="0 0 80 80" width="80" height="80">
+        <circle cx="40" cy="40" r="32" class="ring-bg"/>
+        <circle cx="40" cy="40" r="32" class="ring-fg" stroke-dasharray="${C.toFixed(1)}"
+          style="stroke-dashoffset:${off(from)}" data-off="${off(pct)}"/>
+      </svg>
+      <span>${done ? "✓" : `${pct}<small>%</small>`}</span>
+    </div>`;
+}
+
 function renderHome() {
   const { learn, review, fresh } = queueCounts();
   const tiers = tierStats();
@@ -395,79 +778,107 @@ function renderHome() {
   const learning = tiers.reduce((a, t) => a + t.learning, 0);
   const wrongCount = Object.keys(S.wrong).length;
   const last = S.exams.slice(-5);
-  const pills = Array.from({ length: 5 }, (_, i) => {
-    const e = last[i];
-    if (!e) return `<span class="pill empty">—</span>`;
-    return `<span class="pill ${e.errors <= 1 ? "ok" : "bad"}">${e.total - e.errors}/${e.total}</span>`;
-  }).join("");
   const ready = last.length === 5 && last.every((e) => e.errors <= 1);
   const todo = learn + review + fresh;
+  const unseen = total - Object.keys(S.cards).length;
+  const streak = streakInfo();
+  const goal = todayGoal();
+  const left = examDaysLeft();
+  const chance = readyNow();
+  const finished = !todo && goal.done > 0;
+  updateBadge(false);
+
+  const meta = [];
+  // The chip is the date field itself (transparent on top), so the browser opens and
+  // closes its own picker: tapping outside or Esc dismisses it as usual.
+  if (left === null) meta.push(`<label class="chip date-chip">📅 Коли іспит?
+    <input type="date" id="examDateHome" aria-label="Дата іспиту" min="${new Date().toISOString().slice(0, 10)}"></label>`);
+  else if (left > 0) meta.push(`<span>До іспиту <b>${left} ${plural(left, "день", "дні", "днів")}</b></span>`);
+  else if (left === 0) meta.push(`<span><b>Іспит сьогодні</b> — удачі!</span>`);
+  if (S.logs.length >= 20) {
+    const c = chance.pct >= 90 ? "ok" : chance.pct >= 50 ? "warn" : "bad";
+    meta.push(`<span>Шанс скласти <b class="t-${c}">${chance.pct}%</b>${chance.gain > 0 ? ` <small class="gain">+${chance.gain}</small>` : ""}</span>`);
+  }
+  const slowTip = left !== null && left > 0 && left <= 7 && S.settings.preset === "two" && unseen > 300;
+
+  const examDots = Array.from({ length: 5 }, (_, i) => {
+    const e = last[i];
+    return `<i class="${!e ? "" : e.errors <= 1 ? "ok" : e.passed ? "warn" : "bad"}"></i>`;
+  }).join("");
 
   h(`
-  <div class="top">
-    <h1>ПДР · категорія B</h1>
-    <button class="ghost" data-go="settings" aria-label="Налаштування">Налаштування</button>
+  <div class="top home-top">
+    <h1 class="brand">ПДР <span>· категорія B</span></h1>
+    ${streak.n ? `<span class="streak ${streak.doneToday ? "" : "risk"}" title="Днів поспіль">🔥 ${streak.n}</span>` : ""}
+    <button class="icon-btn" data-go="settings" aria-label="Налаштування" title="Налаштування">${GEAR}</button>
   </div>
+  <button class="search-bar" data-go="search">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+    Пошук питань і тем
+  </button>
   <div class="stack">
     ${outcomeHtml()}
-    <section class="card stack">
-      <div class="row spread">
-        <h2>Сьогодні</h2>
-        <div class="counts" title="нові · навчання · повторення">
-          <span class="c-new">${fresh}</span><span class="c-learn">${learn}</span><span class="c-review">${review}</span>
+    <section class="card hero">
+      <div class="hero-row">
+        ${ringHtml(finished ? 100 : goal.pct, finished)}
+        <div class="hero-text">
+          <h2>${finished ? "Ціль виконано" : goal.done ? "Продовжимо" : "Сьогодні"}</h2>
+          <p class="muted">${todo
+            ? `${fresh ? `${fresh} ${plural(fresh, "нове", "нових", "нових")}` : ""}${fresh && learn + review ? " · " : ""}${learn + review
+              ? `${learn + review} ${plural(learn + review, "повторення", "повторення", "повторень")}` : ""}`
+            : unseen ? "Можна взяти ще нових" : "Усі питання пройдено"}</p>
         </div>
       </div>
-      <p class="muted small">${todo
-        ? `Нових: ${fresh} · на навчанні: ${learn} · повторень: ${review}`
-        : "На сьогодні все. Повертайтеся завтра або пройдіть пробний іспит."}</p>
-      <button class="primary block big" data-go="study" ${todo ? "" : "disabled"}>Вчити</button>
+      ${meta.length ? `<div class="meta">${meta.join("")}</div>` : ""}
+      ${slowTip ? `<p class="small risk-note">Часу мало — увімкніть темп «1 тиждень» у <a href="#" data-go="settings">налаштуваннях</a>.</p>` : ""}
+      ${streak.n && !streak.doneToday ? `<p class="small risk-note">Дайте хоч одну відповідь до ${String(DAY_START_HOUR).padStart(2, "0")}:00, щоб не втратити серію.</p>` : ""}
+      ${todo || !unseen
+        ? `<button class="primary block big" data-go="study" ${todo ? "" : "disabled"}>${goal.done && todo ? "Продовжити" : "Вчити"}</button>`
+        : `<button class="primary block big" data-act="bonus">Ще 20 нових питань</button>`}
+      <div class="week" aria-label="Активність за тиждень">${weekStrip()}</div>
     </section>
+    ${installHtml()}
+
+    <div class="tiles">
+      <button class="tile" data-go="exam">
+        <span class="tile-title">Пробний іспит</span>
+        <span class="tile-sub">${ready ? "✅ Готові до справжнього" : "20 питань · 20 хв"}</span>
+        <span class="exam-dots" title="Останні 5 іспитів">${examDots}</span>
+      </button>
+      <button class="tile" data-go="drill" ${wrongCount ? "" : "disabled"}>
+        <span class="tile-title">Помилки</span>
+        <span class="tile-sub">${wrongCount ? "Повторити" : "Поки немає"}</span>
+        <span class="tile-num ${wrongCount ? "t-bad" : ""}">${wrongCount}</span>
+      </button>
+    </div>
 
     <section class="card stack">
-      <div class="row spread"><h2>Пробний іспит</h2><span class="badge">20 питань · 20 хв</span></div>
-      <p class="muted small">Як у сервісному центрі: 10 ПДР, 4 безпечне водіння, 4 кат. B, 2 домедична допомога. Склав — не більше ${EXAM_MAX_ERRORS} помилок.</p>
-      <div class="pills" aria-label="Останні 5 іспитів">${pills}</div>
-      <p class="small ${ready ? "" : "muted"}">${ready
-        ? "✅ 5 іспитів поспіль з ≤1 помилкою — можна йти на справжній."
-        : "Готовність: 5 іспитів поспіль з ≤1 помилкою."}</p>
-      <button class="block" data-go="exam">Почати іспит</button>
-    </section>
-
-    <section class="card stack">
-      <div class="row spread"><h2>Робота над помилками</h2><span class="badge">${wrongCount}</span></div>
-      <p class="muted small">Питання, на які ви відповіли неправильно. Правильна відповідь прибирає питання зі списку; розклад FSRS не змінюється.</p>
-      <button class="block" data-go="drill" ${wrongCount ? "" : "disabled"}>Повторити помилки</button>
-    </section>
-
-    <section class="card stack">
-      <div class="row spread"><h2>Прогрес</h2><span class="muted small">${known + learning} з ${total} розпочато</span></div>
-      <div class="stat-grid">
-        <div><b class="c-review">${known}</b><span>вивчено</span></div>
-        <div><b style="color:var(--warn)">${learning}</b><span>на навчанні</span></div>
-        <div><b class="c-new">${total - known - learning}</b><span>нових</span></div>
+      <div class="row spread"><h2>Прогрес</h2>
+        <span class="muted small">${Math.round(100 * known / total)}% вивчено</span></div>
+      <div class="bar">
+        <span class="b-known" style="width:${100 * known / total}%"></span>
+        <span class="b-learn" style="width:${100 * learning / total}%"></span>
       </div>
-      <div>
-      ${tiers.map((t) => `
-        <div class="tier">
-          <div class="row spread"><span class="name">${t.n}. ${esc(t.name)}</span>
-            <span class="num">${t.known + t.learning}/${t.total}</span></div>
-          <div class="bar" style="margin-top:6px">
-            <span class="b-known" style="width:${100 * t.known / t.total}%"></span>
-            <span class="b-learn" style="width:${100 * t.learning / t.total}%"></span>
-          </div>
-        </div>`).join("")}
+      <div class="legend">
+        <span><i class="k"></i>${known} вивчено</span>
+        <span><i class="l"></i>${learning} вчу</span>
+        <span><i></i>${total - known - learning} нових</span>
       </div>
+      <details class="tiers">
+        <summary>За темами</summary>
+        ${tiers.map((t) => `
+          <div class="tier">
+            <div class="row spread"><span class="name">${esc(t.name)}</span>
+              <span class="num">${t.known + t.learning}/${t.total}</span></div>
+            <div class="bar">
+              <span class="b-known" style="width:${100 * t.known / t.total}%"></span>
+              <span class="b-learn" style="width:${100 * t.learning / t.total}%"></span>
+            </div>
+          </div>`).join("")}
+      </details>
     </section>
     ${saveFailed ? `<p class="small" style="color:var(--bad)">Браузер не дає зберегти прогрес (приватний режим?). Він зникне після закриття вкладки.</p>` : ""}
-  </div>
-  <footer class="stack">
-    <p>${esc(DB.source)} · ${total} питань</p>
-    <p><a href="https://github.com/punjet/PDRAnkiDeck">GitHub</a> ·
-       <a href="https://ankiweb.net/shared/info/1194338664">Колода Anki</a> ·
-       <a href="https://github.com/punjet/PDRAnkiDeck/blob/main/NOTICE">Ліцензія CC BY-NC-SA 4.0</a> ·
-       <a href="privacy.html">Конфіденційність</a></p>
-    <p>Неофіційний проєкт. Тексти питань і малюнки належать ГСЦ МВС України.</p>
-  </footer>`);
+  </div>`);
 }
 
 const OUTCOMES = [
@@ -482,7 +893,9 @@ function outcomeHtml() {
   const t = S.tele;
   if (!tele.configured || !t.on || FINAL_OUTCOME(t.outcome)) return "";
   if (t.outcome === "not_yet" && Date.now() - t.outcomeAt < 3 * 864e5) return "";
-  if (dayN() < 5 && S.exams.length < 3) return "";
+  const left = examDaysLeft();
+  if (left !== null && left > 0) return "";
+  if (left === null && dayN() < 5 && S.exams.length < 3) return "";
   return `
   <section class="card stack">
     <h2>Як пройшов справжній іспит?</h2>
@@ -492,38 +905,84 @@ function outcomeHtml() {
   </section>`;
 }
 
+// Look-alike questions with another right answer (similar.py), shown after a mistake:
+// seeing the twins side by side is what stops mixing them up.
+function twinsHtml(q) {
+  const twins = (q.sim || []).map((id) => byId[id]).filter(Boolean).slice(0, 2);
+  if (!twins.length) return "";
+  const clip = (t, n) => (t.length > n ? `${t.slice(0, n - 1)}…` : t);
+  return `
+    <div class="twins">
+      <p class="twins-h">Не сплутайте: ${twins.length > 1 ? "схожі питання" : "схоже питання"} з іншою відповіддю</p>
+      ${twins.map((t) => `
+        <details class="twin" data-twin="${esc(t.id)}">
+          <summary>${t.img[0] ? `<img class="thumb" src="img/${esc(t.img[0])}" alt="" loading="lazy">` : ""}
+            <span>${esc(clip(t.t, 120))}</span></summary>
+          <div class="twin-body">
+            ${t.img.map((n) => `<img class="qimg" src="img/${esc(n)}" alt="Малюнок до схожого питання" loading="lazy">`).join("")}
+            ${optionsHtml(t, { reveal: true })}
+          </div>
+        </details>`).join("")}
+    </div>`;
+}
+
+function comboHtml() {
+  if (combo < 3) return "";
+  return ` <span class="combo">🔥 ${combo} поспіль${comboRecord ? " · рекорд!" : ""}</span>`;
+}
+
 // ---- study ----
 function renderStudy() {
   const pick = view.current || nextCard();
   if (!pick.id) {
     const soon = pick.nextAt;
+    const unseen = DB.questions.length - Object.keys(S.cards).length;
+    const done = S.day.answers || 0, ok = S.day.correct || 0;
+    const streak = streakInfo();
+    const chance = readyNow();
+    if (!soon && done && !S.day.goalDone) {
+      S.day.goalDone = true; save(); ev("goal_done", null, done);
+      setTimeout(confetti, 150);
+    }
+    const at = S.plan.remindAt || `${String(new Date().getHours()).padStart(2, "0")}:00`;
     h(`
     <div class="top"><button class="ghost" data-go="home">← Назад</button><h1>Навчання</h1></div>
     <div class="card empty-state stack">
       <div class="emoji">${soon ? "⏳" : "🎉"}</div>
-      <h2>${soon ? "Перерва" : "На сьогодні все"}</h2>
+      <h2>${soon ? "Перерва" : "Ціль на сьогодні виконано"}</h2>
       <p class="muted">${soon
         ? `Наступна картка на навчанні — о ${new Date(soon).toLocaleTimeString("uk-UA", { hour: "2-digit", minute: "2-digit" })}.`
         : "Нові картки й повторення на сьогодні закінчилися."}</p>
+      ${done ? `<div class="stat-grid">
+        <div><b>${done}</b><span>${plural(done, "відповідь", "відповіді", "відповідей")}</span></div>
+        <div><b>${Math.round(100 * ok / done)}%</b><span>правильно</span></div>
+        <div><b>🔥 ${streak.n}</b><span>${plural(streak.n, "день", "дні", "днів")} поспіль</span></div>
+      </div>` : ""}
+      <div style="text-align:left">${readyHtml(chance)}</div>
       ${soon ? `<button class="block" data-act="study-now">Показати зараз</button>` : ""}
       <button class="primary block" data-go="exam">Пробний іспит</button>
+      ${unseen ? `<button class="block" data-act="bonus">Ще 20 нових питань</button>` : ""}
+      ${!soon && !S.plan.remindAt ? `<button class="block" data-act="remind" data-at="${at}">📅 Нагадувати щодня о ${at}</button>` : ""}
+      ${!soon ? `<button class="ghost block" data-act="share" data-where="done">Порадити другу</button>` : ""}
     </div>`);
     return;
   }
   view.current = pick;
   const q = byId[pick.id];
   const { learn, review, fresh } = queueCounts();
-  const st = view.state || { chosen: null, shownAt: activeNow() };
+  const goal = todayGoal();
+  const st = view.state || { chosen: null, shownAt: activeNow(), perm: makePerm(q) };
   view.state = st;
   const answered = st.chosen !== null;
   const correct = answered && st.chosen === q.a;
+  const auto = answered && correct && st.auto;
   let dock = "";
   if (answered) {
     const iv = previewIntervals(q.id);
     dock = correct
       ? `<div class="grades">
            <button data-rate="${Rating.Hard}">Важко<small>${iv[Rating.Hard]}</small></button>
-           <button class="primary" data-rate="${Rating.Good}">Добре<small>${iv[Rating.Good]}</small></button>
+           <button class="primary ${auto ? "auto" : ""}" data-rate="${Rating.Good}" style="--auto:${AUTO_MS}ms">Добре<small>${iv[Rating.Good]}</small></button>
            <button data-rate="${Rating.Easy}">Легко<small>${iv[Rating.Easy]}</small></button>
          </div>`
       : `<button class="primary block big" data-rate="${Rating.Again}">Далі · знову через ${iv[Rating.Again]}</button>`;
@@ -540,12 +999,16 @@ function renderStudy() {
       <span class="c-review ${pick.kind === "review" ? "on" : ""}">${review}</span>
     </div>
   </div>
-  <article class="card">
+  <div class="bar thin" title="Ціль на сьогодні: ${goal.done} з ${goal.done + goal.left}">${barSpan("goal", goal.pct, "b-known")}</div>
+  <article class="card qcard">
     ${questionHtml(q)}
-    ${optionsHtml(q, { chosen: st.chosen, reveal: answered })}
+    ${optionsHtml(q, { chosen: st.chosen, reveal: answered, perm: st.perm, anim: st.anim })}
     ${answered ? `<p class="verdict ${correct ? "ok" : "bad"}">${correct
-      ? "Правильно. Наскільки легко було?"
-      : `Неправильно. Правильна відповідь — ${q.a + 1}.`}</p>` : ""}
+      ? `Правильно.${comboHtml()}<span class="hint">${auto
+        ? "Далі за мить. Торкніться картки, щоб зупинитися, або оцініть самі."
+        : "Наскільки легко було?"}</span>`
+      : `Неправильно. Правильна відповідь — ${shownNo(st.perm, q.a)}.`}</p>` : ""}
+    ${answered && !correct ? twinsHtml(q) : ""}
   </article>
   ${dock ? `<div class="dock"><div class="dock-inner">${dock}</div></div>` : ""}`);
 }
@@ -556,7 +1019,7 @@ function newExam() {
   for (const q of DB.questions) (pools[q.block] ||= []).push(q.id);
   const ids = [];
   for (const { block, count } of DB.ticket) ids.push(...shuffle([...pools[block]]).slice(0, count));
-  return { ids, answers: Array(ids.length).fill(null), i: 0,
+  return { ids, answers: Array(ids.length).fill(null), i: 0, perms: ids.map((id) => makePerm(byId[id])),
            startedAt: Date.now(), shownAt: activeNow(),
            endsAt: Date.now() + EXAM_MINUTES * 60e3 };
 }
@@ -590,11 +1053,11 @@ function renderExam() {
     <span class="timer" id="timer"></span>
   </div>
   <div class="dots">${dots}</div>
-  <article class="card">
+  <article class="card qcard">
     ${questionHtml(q)}
-    ${optionsHtml(q, { chosen, reveal: answered })}
+    ${optionsHtml(q, { chosen, reveal: answered, perm: ex.perms?.[ex.i], anim: ex.anim === ex.i })}
     ${answered ? `<p class="verdict ${chosen === q.a ? "ok" : "bad"}">${chosen === q.a
-      ? "Правильно" : `Неправильно. Правильна відповідь — ${q.a + 1}.`}</p>` : ""}
+      ? "Правильно" : `Неправильно. Правильна відповідь — ${shownNo(ex.perms?.[ex.i], q.a)}.`}</p>` : ""}
   </article>
   <div class="dock"><div class="dock-inner">${dock}</div></div>`);
   if (answered) app.querySelector(".opt.right")?.scrollIntoView({ block: "center" });
@@ -607,7 +1070,7 @@ function examGoto(i) {
   ex.i = i;
   ex.shownAt = activeNow();
   if (timerHandle) { clearInterval(timerHandle); timerHandle = null; }
-  renderExam();
+  vt(renderExam, "next");
 }
 
 function nextUnanswered(ex) {
@@ -651,6 +1114,7 @@ function finishExam(timeout = false) {
 
 function renderResult() {
   const { exam: ex, rec } = view;
+  if (rec.passed && !view.celebrated) { view.celebrated = true; setTimeout(confetti, 200); }
   const wrong = ex.ids.map((id, i) => ({ q: byId[id], chosen: ex.answers[i] }))
     .filter((x) => x.chosen !== x.q.a);
   h(`
@@ -665,10 +1129,12 @@ function renderResult() {
       <button class="primary" data-go="exam">Ще один іспит</button>
       <button data-go="home">На головну</button>
     </div>
+    ${rec.passed ? `<button class="ghost block" data-act="share" data-where="exam"
+      data-text="Склав(ла) пробний іспит ПДР на ${rec.total - rec.errors}/${rec.total} 🚗 Готуюся безкоштовно тут:">Поділитися результатом</button>` : ""}
   </section>
   ${wrong.length ? `<h2 style="margin:20px 0 12px">Помилки</h2>
   <div class="stack">${wrong.map(({ q, chosen }) => `
-    <article class="card">${questionHtml(q)}${optionsHtml(q, { chosen, reveal: true })}
+    <article class="card">${questionHtml(q)}${optionsHtml(q, { chosen, reveal: true, perm: ex.perms?.[ex.ids.indexOf(q.id)] })}
       ${chosen === null ? `<p class="verdict bad">Без відповіді</p>` : ""}</article>`).join("")}
   </div>` : ""}`);
 }
@@ -688,22 +1154,24 @@ function renderDrill() {
     return;
   }
   const q = byId[id];
-  const st = view.state || { chosen: null, shownAt: activeNow() };
+  const st = view.state || { chosen: null, shownAt: activeNow(), perm: makePerm(q) };
   view.state = st;
   const answered = st.chosen !== null;
   const correct = answered && st.chosen === q.a;
+  const auto = correct && st.auto;
   h(`
   <div class="top"><button class="ghost" data-go="home">← Назад</button>
     <h1 class="small muted" style="text-align:center">Помилки · лишилось ${view.queue.length}</h1></div>
-  <article class="card">
+  <article class="card qcard">
     ${questionHtml(q)}
-    ${optionsHtml(q, { chosen: st.chosen, reveal: answered })}
+    ${optionsHtml(q, { chosen: st.chosen, reveal: answered, perm: st.perm, anim: st.anim })}
     ${answered ? `<p class="verdict ${correct ? "ok" : "bad"}">${correct
-      ? "Правильно — питання прибрано зі списку."
-      : `Неправильно. Правильна відповідь — ${q.a + 1}. Питання повториться.`}</p>` : ""}
+      ? `Правильно — питання прибрано зі списку.${comboHtml()}`
+      : `Неправильно. Правильна відповідь — ${shownNo(st.perm, q.a)}. Питання повториться.`}</p>` : ""}
+    ${answered && !correct ? twinsHtml(q) : ""}
   </article>
   ${answered ? `<div class="dock"><div class="dock-inner">
-    <button class="primary block big" data-act="drill-next">Далі</button></div></div>` : ""}`);
+    <button class="primary block big ${auto ? "auto" : ""}" style="--auto:${AUTO_MS}ms" data-act="drill-next">Далі</button></div></div>` : ""}`);
 }
 
 // ---- settings ----
@@ -731,6 +1199,30 @@ function renderSettings() {
     </section>
 
     <section class="card stack">
+      <h2>Навчання</h2>
+      ${[["shuffle", "Перемішувати варіанти відповідей", "Як на іспиті в сервісному центрі: запам'ятовуєте відповідь, а не її номер. Питання з варіантами «Відповіді 1 і 2» не перемішуються."],
+         ["auto", "Автоперехід після правильної відповіді", `Через ${AUTO_MS / 1000} с ставиться «Добре». Торкніться картки, щоб зупинити, або оцініть самі.`],
+         ["motion", "Анімації", "Переходи між питаннями, конфеті за досягнення."]].map(([k, title, note]) => `
+        <div class="pref">
+          <div><b>${title}</b><p class="note">${note}</p></div>
+          <button class="switch ${S.prefs[k] ? "on" : ""}" data-pref="${k}" role="switch" aria-checked="${S.prefs[k]}" aria-label="${title}"><span></span></button>
+        </div>`).join("")}
+    </section>
+
+    <section class="card stack">
+      <h2>Іспит і нагадування</h2>
+      <label class="field"><span>Дата іспиту в сервісному центрі</span>
+        <input type="date" id="examDate" value="${S.plan.examDate || ""}"></label>
+      <label class="field"><span>Нагадування щодня о</span>
+        <input type="time" id="remindAt" value="${S.plan.remindAt || "19:00"}"></label>
+      <p class="note">Нагадування додається у ваш календар (файл .ics) — щодня до дати іспиту, або 14 днів, якщо дату не вказано.</p>
+      <div class="row">
+        <button class="grow" data-act="save-plan">Зберегти дату</button>
+        <button class="grow" data-act="remind">📅 Додати в календар</button>
+      </div>
+    </section>
+
+    <section class="card stack">
       <h2>Офлайн</h2>
       <p class="note">Збереже всі малюнки на пристрій (~30 МБ), щоб вчитися без інтернету. На телефоні додайте сайт на головний екран:
         «Поділитися → На початковий екран» (iPhone) або меню браузера → «Встановити застосунок» (Android).</p>
@@ -747,6 +1239,210 @@ function renderSettings() {
       <button class="block" data-act="reset" style="color:var(--bad)">Скинути весь прогрес</button>
     </section>
   </div>`);
+}
+
+// ---------- search and topics ----------
+// Topics come from topics.py (questions grouped by meaning and named by an LLM, with
+// synonyms people type, Russian included). Search is plain word search with MiniSearch:
+// offline, instant, forgiving to typos and word endings.
+let topicById = {}, qIndex = null, tIndex = null, searchQuery = "", searchHits = [];
+
+// One spelling for Ukrainian and Russian forms of a word: і/и/ы/е/є/э all become "и", so
+// "обгон" finds "обгін", "светофор" finds "світлофор", "кресло" finds "крісло"; fuzzy
+// matching covers the rest. Words that differ more ("детское" / "дитяче") are found
+// through the keywords topics.py wrote for each question in both languages.
+const FOLD = { "і": "и", "ї": "и", "ы": "и", "е": "и", "є": "и", "э": "и", "ё": "и", "ґ": "г", "ъ": "", "ь": "", "'": "", "’": "", "ʼ": "" };
+const STOP = new Set(["і", "й", "в", "у", "на", "з", "із", "зі", "до", "що", "як", "чи", "при", "для", "за", "не", "та",
+  "а", "або", "від", "по", "це", "ви", "вам", "вас", "и", "с", "о", "об", "к"]);
+function foldTerm(term) {
+  const t = term.toLowerCase();
+  if (STOP.has(t) || t.length < 2) return null;
+  return t.replace(/[іїыеєэёґъь'’ʼ]/g, (c) => FOLD[c]);
+}
+const fuzzyOf = (term) => (term.length >= 7 ? 2 : term.length >= 4 ? 1 : 0);
+
+function buildSearch() {
+  topicById = Object.fromEntries((DB.topics || []).map((t) => [t.id, t]));
+  qIndex = new MiniSearch({
+    fields: ["t", "kw", "ans", "o", "sec"], storeFields: [], processTerm: foldTerm,
+    searchOptions: { boost: { t: 3, kw: 2.5, ans: 2, o: 1, sec: 0.5 }, prefix: (t) => t.length >= 3, fuzzy: fuzzyOf, processTerm: foldTerm },
+  });
+  qIndex.addAll(DB.questions.map((q) => ({ id: q.id, t: q.t, kw: (q.kw || []).join(" "), ans: q.o[q.a], o: q.o.join(" "), sec: q.sec })));
+  if (DB.topics?.length) {
+    tIndex = new MiniSearch({
+      fields: ["name", "syn", "desc", "group"], processTerm: foldTerm,
+      searchOptions: { boost: { name: 4, syn: 3, desc: 1, group: 1 }, prefix: (t) => t.length >= 3, fuzzy: fuzzyOf, processTerm: foldTerm },
+    });
+    tIndex.addAll(DB.topics.map((t) => ({ id: t.id, name: t.name, syn: t.syn.join(" "), desc: t.desc, group: t.group })));
+  }
+}
+
+function runSearch(query) {
+  const all = (idx) => {
+    if (!idx || !query.trim()) return [];
+    const hits = idx.search(query, { combineWith: "AND" });
+    return hits.length ? hits : idx.search(query, { combineWith: "OR" });   // all words first, then any
+  };
+  const topics = all(tIndex).slice(0, 4).map((h) => topicById[h.id]);
+  // Questions of a matching topic count too, even when the word is not in their text.
+  const seen = new Set();
+  const qs = [];
+  for (const h of all(qIndex)) { if (!seen.has(h.id)) { seen.add(h.id); qs.push(byId[h.id]); } }
+  for (const t of topics.slice(0, 1)) for (const id of t.q) if (!seen.has(id) && byId[id]) { seen.add(id); qs.push(byId[id]); }
+  return { topics, qs };
+}
+
+function topicProgress(t) {
+  let known = 0;
+  for (const id of t.q) if (S.cards[id]?.state === State.Review) known++;
+  return { known, total: t.q.length, pct: Math.round(100 * known / t.q.length) };
+}
+
+// Practice order inside a topic: past mistakes, then unseen and still learning, then known.
+function topicOrder(t) {
+  const rank = (id) => (S.wrong[id] ? 0 : S.cards[id]?.state === State.Review ? 2 : 1);
+  return shuffle([...t.q].filter((id) => byId[id])).sort((a, b) => rank(a) - rank(b));
+}
+
+// Where "← Назад" returns to; the search view keeps its query.
+const backOf = (v) => (v.name === "search" ? { name: "search" } : v.name === "topic" ? { name: "topic", id: v.id, back: v.back } : { name: v.name });
+
+const clipText = (t, n) => (t.length > n ? `${t.slice(0, n - 1)}…` : t);
+const secShort = (q) => q.sec.match(/^Розділ\s+(\d+(?:\.\d+)*)/)?.[1] || "";
+
+function questionRow(q, practiceKey) {
+  const c = S.cards[q.id];
+  const mark = S.wrong[q.id] ? `<i class="st bad" title="Є помилка"></i>`
+    : c?.state === State.Review ? `<i class="st ok" title="Вивчено"></i>` : c ? `<i class="st warn" title="Вчите"></i>` : "";
+  return `<li><button class="sec" data-practice="${esc(practiceKey)}">
+    <span class="sec-no">${esc(secShort(q))}</span>
+    <span class="sec-name">${esc(clipText(q.t, 130))}<small>№${esc(q.num)}${q.img.length ? " · з малюнком" : ""}</small></span>${mark}
+  </button></li>`;
+}
+
+function topicRow(t) {
+  const p = topicProgress(t);
+  return `<li><button class="sec" data-topic="${t.id}">
+    <span class="sec-name">${esc(t.name)}<small>${p.total} ${plural(p.total, "питання", "питання", "питань")}${p.known ? ` · вивчено ${p.pct}%` : ""}</small></span>
+    ${p.known ? `<span class="mini-ring" style="--p:${p.pct}"></span>` : ""}
+  </button></li>`;
+}
+
+function renderSearch() {
+  h(`
+  <div class="top"><button class="ghost" data-go="home">← Назад</button><h1>Пошук</h1></div>
+  <div class="search-box">
+    <input id="q" type="search" inputmode="search" autocomplete="off" enterkeyhint="search"
+      placeholder="обгін, трамвай, знак «Стоп», аварійка…" value="${esc(searchQuery)}" aria-label="Пошук питань і тем">
+  </div>
+  <div id="results"></div>`);
+  renderSearchResults();
+  const input = document.getElementById("q");
+  if (!searchQuery) input.focus({ preventScroll: true });
+}
+
+let searchLogTimer = null;
+function renderSearchResults() {
+  const box = document.getElementById("results");
+  if (!box) return;
+  const q = searchQuery.trim();
+  if (!q) {
+    searchHits = [];
+    box.innerHTML = DB.topics?.length ? browseHtml()
+      : `<p class="muted small search-hint">Шукайте за словами з питання або відповіді. Можна з помилками й російською.</p>`;
+    return;
+  }
+  const { topics, qs } = runSearch(q);
+  searchHits = qs;
+  const shown = qs.slice(0, 60);
+  box.innerHTML = `
+    ${topics.length ? `<h2 class="res-h">Теми</h2><ol class="seclist">${topics.map(topicRow).join("")}</ol>` : ""}
+    ${qs.length ? `<h2 class="res-h">Питання <span class="muted">${qs.length}</span></h2>
+      <ol class="seclist">${shown.map((x) => questionRow(x, x.id)).join("")}</ol>
+      ${qs.length > shown.length ? `<p class="muted small search-hint">Показано ${shown.length} з ${qs.length}. Уточніть запит.</p>` : ""}`
+    : topics.length ? "" : `<div class="empty-state"><p class="muted">Нічого не знайдено. Спробуйте інше слово або коротшу форму: «обго», «розвор».</p></div>`}`;
+  // Only how many results came back is logged, never the text typed.
+  clearTimeout(searchLogTimer);
+  searchLogTimer = setTimeout(() => ev("search", qs.length || topics.length ? "found" : "none", qs.length), 1500);
+}
+
+function browseHtml() {
+  const groups = [];
+  for (const t of DB.topics) {
+    let g = groups.find((x) => x.name === t.group);
+    if (!g) groups.push(g = { name: t.group, topics: [] });
+    g.topics.push(t);
+  }
+  return `<p class="muted small search-hint">Або оберіть тему:</p>
+    ${groups.map((g) => `
+      <details class="group">
+        <summary>${esc(g.name)} <span class="muted">${g.topics.length}</span></summary>
+        <ol class="seclist">${g.topics.map(topicRow).join("")}</ol>
+      </details>`).join("")}`;
+}
+
+function renderTopic() {
+  const t = topicById[view.id];
+  if (!t) return go({ name: "search" });
+  const p = topicProgress(t);
+  const ids = topicOrder(t);
+  h(`
+  <div class="top"><button class="ghost" data-act="back">← Назад</button><h1 class="small muted">${esc(t.group)}</h1></div>
+  <section class="card stack">
+    <h2 class="topic-h">${esc(t.name)}</h2>
+    <p class="muted">${esc(t.desc)}</p>
+    <div class="bar"><span class="b-known" style="width:${p.pct}%"></span></div>
+    <p class="small muted">Вивчено ${p.known} з ${p.total}</p>
+    <button class="primary block big" data-practice="all">Тренувати тему · ${p.total} ${plural(p.total, "питання", "питання", "питань")}</button>
+    <p class="note">Спершу ваші помилки, потім нові. Розклад повторень не змінюється, а помилки потраплять у «Помилки».</p>
+  </section>
+  <ol class="seclist topic-list">${ids.map((id) => questionRow(byId[id], id)).join("")}</ol>`);
+}
+
+function renderPractice() {
+  const id = view.ids[view.i];
+  if (!id || view.done) {
+    const n = Object.keys(view.results).length, ok = Object.values(view.results).filter(Boolean).length;
+    h(`
+    <div class="top"><button class="ghost" data-act="back">← Назад</button><h1 class="small muted">${esc(view.title)}</h1></div>
+    <div class="card empty-state stack">
+      <div class="emoji">${n && ok === n ? "🎉" : "✅"}</div>
+      <h2>${n ? `${ok} з ${n} правильно` : "Готово"}</h2>
+      ${n && ok < n ? `<p class="muted">Помилки додано в «Робота над помилками».</p>` : ""}
+      <button class="primary block" data-act="practice-again">Ще раз</button>
+      <button class="block" data-act="back">Назад</button>
+    </div>`);
+    if (n >= 5 && ok === n) setTimeout(confetti, 150);
+    return;
+  }
+  const q = byId[id];
+  const st = view.state || { chosen: null, shownAt: activeNow(), perm: makePerm(q) };
+  view.state = st;
+  const answered = st.chosen !== null;
+  const correct = answered && st.chosen === q.a;
+  const auto = correct && st.auto;
+  h(`
+  <div class="top"><button class="ghost" data-act="back">← Назад</button>
+    <h1 class="small muted" style="text-align:center">${esc(clipText(view.title, 40))} · ${view.i + 1} з ${view.ids.length}</h1></div>
+  <div class="bar thin"><span class="b-known" style="width:${100 * view.i / view.ids.length}%"></span></div>
+  <article class="card qcard">
+    ${questionHtml(q)}
+    ${optionsHtml(q, { chosen: st.chosen, reveal: answered, perm: st.perm, anim: st.anim })}
+    ${answered ? `<p class="verdict ${correct ? "ok" : "bad"}">${correct
+      ? `Правильно.${comboHtml()}`
+      : `Неправильно. Правильна відповідь — ${shownNo(st.perm, q.a)}.`}</p>` : ""}
+    ${answered && !correct ? twinsHtml(q) : ""}
+  </article>
+  ${answered ? `<div class="dock"><div class="dock-inner">
+    <button class="primary block big ${auto ? "auto" : ""}" style="--auto:${AUTO_MS}ms" data-act="practice-next">${
+      view.i + 1 < view.ids.length ? "Далі" : "Завершити"}</button></div></div>` : ""}`);
+}
+
+function practiceNext() {
+  cancelAuto();
+  view.state = null;
+  if (view.i + 1 >= view.ids.length) view.done = true; else view.i++;
+  vt(render, "next");
 }
 
 // ---------- events ----------
@@ -812,13 +1508,7 @@ app.addEventListener("click", async (e) => {
     });
     return go({ name: "home" });
   }
-  if (act === "drill-next") {
-    const id = view.queue.shift();
-    if (view.state.chosen === byId[id].a) { delete S.wrong[id]; save(); }
-    else view.queue.push(id);
-    view.state = null;
-    return render();
-  }
+  if (act === "drill-next") return drillNext();
   if (act === "save-settings") {
     const n = (sel, lo, hi, d) => {
       const v = Number(document.getElementById(sel).value);
@@ -837,33 +1527,144 @@ app.addEventListener("click", async (e) => {
   if (act === "export") return exportProgress();
   if (act === "reset") {
     if (confirm("Видалити весь прогрес, історію іспитів і помилки? Це не можна скасувати.")) {
-      const keep = { tele: S.tele };
+      const keep = { tele: S.tele, plan: S.plan };
       S = { ...defaultState(), ...keep, firstSeen: Date.now() }; save(); makeScheduler(); go({ name: "home" });
     }
     return;
   }
   if (act === "offline") return saveOffline(t);
+  if (t.dataset.topic) return go({ name: "topic", id: t.dataset.topic, back: backOf(view) });
+  if (t.dataset.practice !== undefined) {
+    // From search results or a topic: practise that list, starting at the tapped question.
+    const ids = view.name === "topic" ? topicOrder(topicById[view.id]) : searchHits.map((x) => x.id);
+    const start = t.dataset.practice === "all" ? 0 : ids.indexOf(t.dataset.practice);
+    const title = view.name === "topic" ? topicById[view.id].name : `Пошук: ${searchQuery}`;
+    return go({ name: "practice", ids, i: Math.max(0, start), results: {}, title, back: backOf(view) });
+  }
+  if (act === "back") return go(view.back || { name: "home" });
+  if (act === "practice-next") return practiceNext();
+  if (act === "practice-again") return go({ ...view, i: 0, results: {}, state: null, done: false });
+  if (t.dataset.pref) {
+    const k = t.dataset.pref;
+    S.prefs[k] = !S.prefs[k]; save();
+    return render();
+  }
+  if (act === "bonus") {
+    S.day.bonus = (S.day.bonus || 0) + 20;
+    save(); ev("bonus", null, S.day.bonus);
+    return go({ name: "study" });
+  }
+  if (act === "remind") {
+    const at = document.getElementById("remindAt")?.value || t.dataset.at || "19:00";
+    downloadReminder(at);
+    return render();
+  }
+  if (act === "save-plan") {
+    setExamDate(document.getElementById("examDate").value);
+    return go({ name: "home" });
+  }
+  if (act === "share") {
+    return shareApp(t.dataset.where, t.dataset.text || "Безкоштовний тренажер ПДР: усі питання ГСЦ і пробний іспит, як у сервісному центрі 🚗");
+  }
+  if (act === "install" && installEvt) {
+    ev("install_click");
+    installEvt.prompt();
+    const { outcome } = await installEvt.userChoice.catch(() => ({}));
+    if (outcome !== "accepted") S.ui.installLaterAt = Date.now();
+    installEvt = null; save(); return render();
+  }
+  if (act === "install-later") {
+    S.ui.installLaterAt = Date.now(); save(); ev("install_later");
+    return render();
+  }
+});
+
+function setExamDate(v) {
+  S.plan.examDate = /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null;
+  save();
+  const left = examDaysLeft();
+  if (left !== null) ev("exam_date", null, Math.max(-1000, Math.min(1000, left)));
+}
+
+// Desktop Chrome opens a date field's calendar only from its icon; open it on any click.
+// Touch browsers open it natively on tap, so they are left alone.
+app.addEventListener("click", (e) => {
+  if (e.target.id === "examDateHome" && matchMedia("(pointer: fine)").matches) {
+    try { e.target.showPicker(); } catch (err) { /* already open or unsupported */ }
+  }
+});
+
+// "toggle" does not bubble: listen in the capture phase.
+app.addEventListener("toggle", (e) => {
+  if (e.target.matches?.(".twin") && e.target.open) ev("twin_open", e.target.dataset.twin);
+}, true);
+
+app.addEventListener("pointerdown", (e) => {
+  if (autoTimer && !e.target.closest(".dock")) cancelAuto();
+});
+
+app.addEventListener("input", (e) => {
+  if (e.target.id === "q") { searchQuery = e.target.value; renderSearchResults(); }
 });
 
 app.addEventListener("change", (e) => {
   if (e.target.id === "importFile" && e.target.files[0]) importProgress(e.target.files[0]);
+  if (e.target.id === "examDateHome" && e.target.value) { setExamDate(e.target.value); render(); }
 });
+
+function drillNext() {
+  cancelAuto();
+  const id = view.queue.shift();
+  if (view.state.chosen === byId[id].a) { delete S.wrong[id]; save(); }
+  else view.queue.push(id);
+  view.state = null;
+  vt(render, "next");
+}
 
 function pickOption(i) {
   if (view.name === "exam") {
     const ex = view.exam;
     if (ex.answers[ex.i] !== null) return;
     ex.answers[ex.i] = i;
-    trackAnswer(byId[ex.ids[ex.i]], "exam", i, activeNow() - ex.shownAt);
-    return renderExamKeepTimer();
+    const first = markActive(); save();
+    trackAnswer(byId[ex.ids[ex.i]], "exam", i, activeNow() - ex.shownAt, null, null,
+      { shuffled: isShuffled(ex.perms[ex.i]) });
+    try { navigator.vibrate?.(i === byId[ex.ids[ex.i]].a ? 12 : [40, 60, 40]); } catch (e) { /* not allowed */ }
+    ex.anim = ex.i;
+    renderExamKeepTimer();
+    ex.anim = null;
+    if (first) streakToast();
+    return;
   }
-  if ((view.name === "study" || view.name === "drill") && view.state && view.state.chosen === null) {
+  if (["study", "drill", "practice"].includes(view.name) && view.state && view.state.chosen === null) {
     view.state.chosen = i;
     view.state.rt = activeNow() - view.state.shownAt;
-    if (view.name === "drill") trackAnswer(byId[view.queue[0]], "drill", i, view.state.rt);
+    const q = byId[view.name === "drill" ? view.queue[0] : view.name === "practice" ? view.ids[view.i] : view.current.id];
+    const right = i === q.a;
+    combo = right ? combo + 1 : 0;
+    comboRecord = right && combo >= 10 && combo > (S.best.combo || 0);
+    if (combo > (S.best.combo || 0)) S.best.combo = combo;
+    const first = markActive(); save();
+    try { navigator.vibrate?.(right ? 12 : [40, 60, 40]); } catch (e) { /* not allowed */ }
+    if (view.name !== "study") {
+      trackAnswer(q, view.name === "drill" ? "drill" : "topic", i, view.state.rt, null, null, { shuffled: isShuffled(view.state.perm) });
+    }
+    if (view.name === "practice") {
+      view.results[view.i] = right;
+      if (!right) S.wrong[q.id] = Date.now();   // goes to "Помилки"; the FSRS schedule is not touched
+      save();
+    }
+    const st = view.state;
+    st.auto = right && S.prefs.auto;
+    st.anim = true;
     render();
+    st.anim = false;
     // On a phone the right answer can sit under the bottom bar: bring it into view.
-    app.querySelector(".opt.right")?.scrollIntoView({ block: "center" });
+    app.querySelector(".opt.right")?.scrollIntoView({ block: "center", behavior: motionOn() ? "smooth" : "auto" });
+    if (first) streakToast();
+    if (comboRecord) confetti();
+    if (st.auto) armAuto(() => (view.name === "study" ? doRate(Rating.Good, true)
+      : view.name === "practice" ? practiceNext() : drillNext()));
   }
 }
 
@@ -874,22 +1675,27 @@ function renderExamKeepTimer() {
   window.scrollTo(0, y);
 }
 
-function doRate(r) {
+function doRate(r, auto = false) {
+  cancelAuto();
   const id = view.current.id;
   // Logged at grading time so the FSRS state is the one before this answer.
   // An undone answer stays in the stats: the person did answer it that way.
-  trackAnswer(byId[id], "study", view.state.chosen, view.state.rt, r, S.cards[id] || createEmptyCard(new Date()));
+  trackAnswer(byId[id], "study", view.state.chosen, view.state.rt, r, S.cards[id] || createEmptyCard(new Date()),
+    { shuffled: isShuffled(view.state.perm), auto_rated: auto });
   const undo = rate(id, r);
-  view = { name: "study", undo };
-  render();
+  // A card failed in a learning step can be due again at once: show something else first.
+  const pick = nextCard(id);
+  view = { name: "study", undo, current: pick.id ? pick : undefined };
+  vt(render, "next");
+  checkMilestone();
 }
 
 document.addEventListener("keydown", (e) => {
   if (e.target.matches("input, select, textarea") || e.metaKey || e.ctrlKey || e.altKey) return;
   const n = Number(e.key);
   if (n >= 1 && n <= 9) {
-    const btn = app.querySelector(`[data-opt="${n - 1}"]:not([disabled])`);
-    if (btn) { e.preventDefault(); return pickOption(n - 1); }
+    const btn = app.querySelectorAll(".opts .opt")[n - 1];
+    if (btn && !btn.disabled) { e.preventDefault(); return pickOption(Number(btn.dataset.opt)); }
   }
   if (e.key === " " || e.key === "Enter") {
     const main = app.querySelector(".dock .primary:not([disabled])");
@@ -915,6 +1721,9 @@ async function importProgress(file) {
     if (!confirm("Замінити поточний прогрес даними з файлу?")) return;
     S = { ...defaultState(), ...data.state };
     S.tele = { ...defaultState().tele, ...S.tele };
+    for (const k of ["plan", "ui", "best", "prefs"]) S[k] = { ...defaultState()[k], ...S[k] };
+    S.day = { ...newDay(S.day.key), ...S.day };
+    seedDays();
     save(); makeScheduler(); go({ name: "home" });
   } catch (err) {
     alert("Це не файл прогресу цього застосунку.");
@@ -951,8 +1760,13 @@ async function saveOffline(btn) {
 async function boot() {
   S = load();
   S.tele = { ...defaultState().tele, ...S.tele };
+  for (const k of ["plan", "ui", "best", "prefs"]) S[k] = { ...defaultState()[k], ...S[k] };
+  S.day = { ...newDay(S.day.key), ...S.day };
+  seedDays();
   if (!S.firstSeen) S.firstSeen = Date.now();
   if (!S.tele.uid) S.tele.uid = crypto.randomUUID();
+  // App icon shortcuts (manifest) open a screen directly: ?go=study|exam|drill
+  const start = new URLSearchParams(location.search).get("go");
   readSource();
   if (!S.tele.visited && !S.tele.firstSrc) S.tele.firstSrc = sess.src || null;
   // On by default; can be turned off on privacy.html (footer link "Конфіденційність").
@@ -972,13 +1786,20 @@ async function boot() {
   // Drop progress for questions that are no longer in the base after an update.
   for (const id of Object.keys(S.cards)) if (!byId[id]) delete S.cards[id];
   for (const id of Object.keys(S.wrong)) if (!byId[id]) delete S.wrong[id];
+  buildSearch();
+  if (["study", "exam", "drill", "search"].includes(start)) view = { name: start };
+  // Links from the topic pages: ?topic=t01 opens that topic.
+  const topicParam = new URLSearchParams(location.search).get("topic");
+  if (topicParam && topicById[topicParam]) view = { name: "topic", id: topicParam, back: { name: "home" } };
   render();
   startSession();
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 }
 
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible" && DB && view.name === "home") render();
+  if (!DB) return;
+  updateBadge();
+  if (document.visibilityState === "visible" && view.name === "home") render();
 });
 
 boot();

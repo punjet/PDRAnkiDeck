@@ -3,7 +3,7 @@ name: Deploy web app to GitHub Pages
 on:
   push:
     branches: [main]
-    paths: ["web/**", "data/**", "build_web.py", "deck_order.py", ".github/workflows/pages.yml"]
+    paths: ["web/**", "data/**", "build_web.py", "build_seo.py", "indexnow.py", "deck_order.py", ".github/workflows/pages.yml"]
   workflow_dispatch:
 
 permissions:
@@ -14,6 +14,12 @@ permissions:
 concurrency:
   group: pages
   cancel-in-progress: true
+
+env:
+  # Own domain: set to e.g. https://example.com.ua/ (also writes CNAME).
+  SITE_URL: https://punjet.github.io/PDRAnkiDeck/
+  # How many explained question pages are live; raise it every week or two (0 = all).
+  SEO_MAX_EXPLAINED: "200"
 
 jobs:
   deploy:
@@ -27,9 +33,12 @@ jobs:
         with:
           python-version: "3.12"
       - run: python build_web.py data _site
+      # The sitemap that is live now, to tell search engines only what changed.
+      - run: curl -fsS "${SITE_URL}sitemap.xml" -o old_sitemap.xml || true
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site
       - id: deployment
         uses: actions/deploy-pages@v4
+      - run: python indexnow.py old_sitemap.xml _site/sitemap.xml

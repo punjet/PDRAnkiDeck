@@ -4,3 +4,4 @@ opencv-python-headless==5.0.0.93
 pytesseract==0.3.13
 numpy==2.5.4
 curl_cffi==0.16.3
+openai==2.36.0

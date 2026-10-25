@@ -2,7 +2,7 @@
 
 Usage: python build_web.py [data_dir] [out_dir]
 
-Writes out_dir/ = web/* + questions.json (category B only, in new-card order,
+Writes out_dir/ = web/* + questions.json + static SEO pages (build_seo.py) (category B only, in new-card order,
 same tiers as the Anki deck) + img/ (only the pictures those questions use).
 Needs nothing beyond the standard library, so CI can run it as is.
 """
@@ -12,6 +12,7 @@ import os
 import shutil
 import sys
 
+import build_seo
 from deck_order import TICKET, TIERS, block_of, ordered, tier_of
 
 DATA = sys.argv[1] if len(sys.argv) > 1 else "data"
@@ -26,13 +27,23 @@ if os.path.exists(OUT):
 shutil.copytree(WEB, OUT)
 os.makedirs(os.path.join(OUT, "img"))
 
+# Confusable neighbours from similar.py (optional): ids of look-alike questions with another answer.
+sim_path = os.path.join(DATA, "similar.json")
+SIM = json.load(open(sim_path, encoding="utf-8"))["similar"] if os.path.exists(sim_path) else {}
+
 out = []
+seo = []  # same entries plus the section id, for build_seo
 for q in ordered(data["questions"]):
     if q["verified"] not in ("ocr+template+brut", "template+brut", "manual"):
         sys.exit(f"category B answer not verified: {q['id']}")
     imgs = []
-    for rel in q.get("images") or []:
-        name = os.path.basename(rel)
+    pics = q.get("images") or []
+    for j, rel in enumerate(pics):
+        # Descriptive, stable file names ("16-2-74-yaka-chergovist-proizdu.jpeg"): Google uses
+        # them for image search. Built from the question number and text, which never change.
+        ext = rel.rsplit(".", 1)[-1].lower()
+        stem = f"{q['legacyId'].replace('.', '-')}-{build_seo.slug(q['text'])[:40].strip('-')}"
+        name = f"{stem}{'-' + str(j + 1) if len(pics) > 1 else ''}.{ext}"
         shutil.copy(os.path.join(DATA, rel), os.path.join(OUT, "img", name))
         imgs.append(name)
     sec = f"Розділ {q['section']}. {sections[q['section']].capitalize()}"
@@ -51,6 +62,26 @@ for q in ordered(data["questions"]):
         "tier": tier_of(q)[0],
         "block": block_of(q),
     })
+    if SIM.get(q["legacyId"]):
+        out[-1]["sim"] = [i for i, _ in SIM[q["legacyId"]]]
+    seo.append({**out[-1], "section": q["section"]})
+
+# Search keywords from topics.py (optional): phrases people type, Ukrainian and Russian.
+kw_path = os.path.join(DATA, "keywords.json")
+KW = json.load(open(kw_path, encoding="utf-8"))["kw"] if os.path.exists(kw_path) else {}
+for e in out:
+    if KW.get(e["id"]):
+        e["kw"] = KW[e["id"]]
+
+# Topics from topics.py (optional): groups of questions by meaning, for search and practice.
+topics_path = os.path.join(DATA, "topics.json")
+TOPICS = json.load(open(topics_path, encoding="utf-8"))["topics"] if os.path.exists(topics_path) else []
+
+known_ids = {e["id"] for e in out}
+for e in out:   # a neighbour may be a question left out of category B
+    keep = [i for i in e.pop("sim", []) if i in known_ids]
+    if keep:
+        e["sim"] = keep
 
 payload = {
     "source": "ГСЦ МВС, наказ № 225 від 29.10.2025",
@@ -58,6 +89,8 @@ payload = {
     "ticket": [{"block": k, "count": c} for k, c, _ in TICKET],
     "questions": out,
 }
+if TOPICS:
+    payload["topics"] = [{**t, "q": [i for i in t["q"] if i in known_ids]} for t in TOPICS]
 body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 with open(os.path.join(OUT, "questions.json"), "w", encoding="utf-8") as f:
     f.write(body)
@@ -74,5 +107,8 @@ with open(sw, encoding="utf-8") as f:
 with open(sw, "w", encoding="utf-8") as f:
     f.write(src.replace("__BUILD__", h.hexdigest()[:12]))
 
-print(f"{len(out)} questions, "
+seo_stats = build_seo.build(OUT, seo, sections, {k: c for k, c, _ in TICKET})
+
+print(f"{len(out)} questions ({seo_stats['explained']} explained), "
+      f"{seo_stats['sitemap']} pages in sitemap, "
       f"{len(os.listdir(os.path.join(OUT, 'img')))} images -> {OUT}/")

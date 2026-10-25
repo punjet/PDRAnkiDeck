@@ -20,7 +20,7 @@ create table if not exists public.answers (
   uid           uuid not null,                 -- random per browser
   sid           uuid not null,                 -- random per app launch
   qid           text not null check (length(qid) between 1 and 16),
-  mode          text not null check (mode in ('study', 'exam', 'drill')),
+  mode          text not null check (mode in ('study', 'exam', 'drill', 'topic')),   -- topic: practice of a topic or search results
   chosen        smallint not null check (chosen between 0 and 9),
   correct       boolean not null,
   n_options     smallint not null check (n_options between 2 and 10),
@@ -96,7 +96,7 @@ create table if not exists public.pings (
   kind          text not null check (kind in ('start', 'beat', 'hide')),
   active_s      integer not null check (active_s between 0 and 86400),   -- visible time in this session
   answers       integer not null check (answers between 0 and 100000),   -- answers in this session
-  screen        text check (screen in ('home', 'study', 'exam', 'result', 'drill', 'settings')),
+  screen        text check (screen in ('home', 'study', 'exam', 'result', 'drill', 'settings', 'search', 'topic', 'practice')),
   qid           text check (length(qid) <= 16),                          -- question on screen, if any
   first_visit   boolean,                                                 -- first session of this uid
   src           text check (src ~ '^[a-z0-9_.-]{1,40}$'),                -- ?src= / utm tag of this visit
@@ -109,15 +109,45 @@ create table if not exists public.pings (
   app_ver       text check (length(app_ver) <= 32)
 );
 
+-- v1.4: options shown in a shuffled order (as in the HSC exam), and right answers graded
+-- "Добре" by the auto-advance timer instead of a tap. `chosen` stays the option's index in the base.
+alter table public.answers add column if not exists shuffled   boolean;
+alter table public.answers add column if not exists auto_rated boolean;
+
+-- v1.3: motivation features. Streak, pass chance and days to the exam on the session start ping.
+alter table public.pings add column if not exists streak    integer  check (streak between 0 and 10000);
+alter table public.pings add column if not exists ready_pct smallint check (ready_pct between 0 and 100);
+alter table public.pings add column if not exists exam_in   integer  check (exam_in between -1000 and 1000);  -- days to the exam date set by the person
+
+-- v1.3: taps on motivation features, to see which ones bring people back.
+create table if not exists public.events (
+  id            bigint generated always as identity primary key,
+  created_at    timestamptz not null default now(),
+  eid           uuid not null unique,
+  uid           uuid not null,
+  sid           uuid not null,
+  kind          text not null check (kind in ('share', 'install_shown', 'install_click', 'install_done',
+                  'install_later', 'ics', 'bonus', 'goal_done', 'exam_date', 'twin_open', 'search')),
+  detail        text check (detail ~ '^[a-z0-9_.-]{1,40}$'),   -- share: where; ics: HHMM; install_shown: prompt/ios; twin_open: id of the look-alike question; search: found/none (never the text typed)
+  n             integer check (n between -1000 and 100000),   -- share: 1 sheet / 0 copied; ics: days; bonus: extra cards today; goal_done: answers; exam_date: days left
+  streak        integer check (streak between 0 and 10000),
+  day_n         integer not null check (day_n between 0 and 10000),
+  local_hour    smallint not null check (local_hour between 0 and 23),
+  device        text check (device in ('phone', 'tablet', 'desktop')),
+  standalone    boolean,
+  app_ver       text check (length(app_ver) <= 32)
+);
+
 -- No direct table access for the public key at all: RLS on, no policies, no grants.
 alter table public.answers  enable row level security;
 alter table public.exams    enable row level security;
 alter table public.outcomes enable row level security;
 alter table public.pings    enable row level security;
-revoke all on public.answers, public.exams, public.outcomes, public.pings from anon, authenticated;
+alter table public.events   enable row level security;
+revoke all on public.answers, public.exams, public.outcomes, public.pings, public.events from anon, authenticated;
 
 -- The only entry point: POST /rest/v1/rpc/ingest {"t": "answers", "rows": [...]}.
--- Runs as the owner, accepts only these four tables and at most 200 rows per
+-- Runs as the owner, accepts only these five tables and at most 200 rows per
 -- call; CHECK constraints still apply, and a re-sent row (same eid) is skipped.
 create or replace function public.ingest(t text, rows jsonb)
 returns void
@@ -130,8 +160,8 @@ begin
     raise exception 'rows must be an array of at most 200 items';
   end if;
   if t = 'answers' then
-    insert into public.answers (eid, uid, sid, qid, mode, chosen, correct, n_options, rt_ms, rating, state, stability, difficulty, reps, lapses, elapsed_days, day_n, local_hour, preset, new_per_day, retention, device, standalone, app_ver)
-    select eid, uid, sid, qid, mode, chosen, correct, n_options, rt_ms, rating, state, stability, difficulty, reps, lapses, elapsed_days, day_n, local_hour, preset, new_per_day, retention, device, standalone, app_ver
+    insert into public.answers (eid, uid, sid, qid, mode, chosen, correct, n_options, rt_ms, rating, state, stability, difficulty, reps, lapses, elapsed_days, day_n, local_hour, preset, new_per_day, retention, device, standalone, app_ver, shuffled, auto_rated)
+    select eid, uid, sid, qid, mode, chosen, correct, n_options, rt_ms, rating, state, stability, difficulty, reps, lapses, elapsed_days, day_n, local_hour, preset, new_per_day, retention, device, standalone, app_ver, shuffled, auto_rated
     from jsonb_populate_recordset(null::public.answers, rows)
     on conflict (eid) do nothing;
   elsif t = 'exams' then
@@ -145,9 +175,14 @@ begin
     from jsonb_populate_recordset(null::public.outcomes, rows)
     on conflict (eid) do nothing;
   elsif t = 'pings' then
-    insert into public.pings (eid, uid, sid, seq, kind, active_s, answers, screen, qid, first_visit, src, first_src, ref, day_n, local_hour, device, standalone, app_ver)
-    select eid, uid, sid, seq, kind, active_s, answers, screen, qid, first_visit, src, first_src, ref, day_n, local_hour, device, standalone, app_ver
+    insert into public.pings (eid, uid, sid, seq, kind, active_s, answers, screen, qid, first_visit, src, first_src, ref, day_n, local_hour, device, standalone, app_ver, streak, ready_pct, exam_in)
+    select eid, uid, sid, seq, kind, active_s, answers, screen, qid, first_visit, src, first_src, ref, day_n, local_hour, device, standalone, app_ver, streak, ready_pct, exam_in
     from jsonb_populate_recordset(null::public.pings, rows)
+    on conflict (eid) do nothing;
+  elsif t = 'events' then
+    insert into public.events (eid, uid, sid, kind, detail, n, streak, day_n, local_hour, device, standalone, app_ver)
+    select eid, uid, sid, kind, detail, n, streak, day_n, local_hour, device, standalone, app_ver
+    from jsonb_populate_recordset(null::public.events, rows)
     on conflict (eid) do nothing;
   else
     raise exception 'unknown table %', t;
@@ -163,3 +198,4 @@ create index if not exists answers_uid_idx on public.answers (uid, created_at);
 create index if not exists exams_uid_idx   on public.exams (uid, created_at);
 create index if not exists pings_sid_idx   on public.pings (sid, seq);
 create index if not exists pings_uid_idx   on public.pings (uid, created_at);
+create index if not exists events_uid_idx  on public.events (uid, created_at);

@@ -3,8 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>ПДР України — категорія B</title>
-<meta name="description" content="Усі питання теоретичного іспиту ГСЦ МВС для категорії B з інтервальними повтореннями FSRS і пробним іспитом. Безкоштовно, без реклами, працює офлайн.">
+<title>Тести ПДР __YEAR__ онлайн — категорія B, усі __COUNT__ питань ГСЦ</title>
+<meta name="description" content="Усі __COUNT__ питань теоретичного іспиту ГСЦ МВС для категорії B з правильними відповідями, інтервальними повтореннями FSRS і пробним іспитом. Безкоштовно, без реклами, працює офлайн.">
+<link rel="canonical" href="__SITE__">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="ПДР України — категорія B">
+<meta property="og:locale" content="uk_UA">
+<meta property="og:title" content="Тести ПДР __YEAR__ — категорія B, усі __COUNT__ питань ГСЦ">
+<meta property="og:description" content="Безкоштовний тренажер: інтервальні повторення FSRS, як в Anki, і пробний іспит на 20 питань. Без реклами, працює офлайн.">
+<meta property="og:url" content="__SITE__">
+<meta property="og:image" content="__SITE__og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
 <meta name="theme-color" content="#1d4ed8" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0f172a" media="(prefers-color-scheme: dark)">
 <link rel="manifest" href="manifest.webmanifest">
@@ -14,11 +25,47 @@
 <meta name="apple-mobile-web-app-title" content="ПДР B">
 <link rel="stylesheet" href="style.css">
 <script type="module" src="app.js"></script>
+<!--JSONLD-->
 </head>
 <body>
 <div id="app" aria-live="polite">
   <p class="loading">Завантаження питань…</p>
 </div>
+<main id="about" class="seo">
+  <section class="about-block">
+    <h1>Тести ПДР __YEAR__ онлайн для категорії B</h1>
+    <p>Усі __COUNT__ питань теоретичного іспиту в сервісному центрі МВС для категорії B: розділи 1–39
+      і 44–47 чинної бази ГСЦ (наказ № 225 від 29.10.2025), з малюнками й правильними відповідями,
+      перевіреними трьома незалежними способами.</p>
+    <p>Спершу — питання, що найчастіше трапляються в білеті; далі кожне повторюється саме тоді, коли ви
+      от-от його забудете (алгоритм FSRS, як в Anki). Так за 1–2 тижні можна пройти всю базу.</p>
+  </section>
+  <section class="about-block">
+    <h2>Часті питання</h2>
+    <details><summary>Скільки питань на іспиті з ПДР?</summary>
+      <p>20 питань: 10 з ПДР, 4 з основ безпечного водіння, 4 додаткові питання категорії B і 2 з домедичної
+        допомоги. На відповіді дається 20 хвилин.</p></details>
+    <details><summary>Скільки помилок можна зробити?</summary>
+      <p>Не більше двох. Третя помилка означає, що іспит не складено.</p></details>
+    <details><summary>Це безкоштовно?</summary>
+      <p>Так, без реклами й реєстрації. Прогрес зберігається у вашому браузері, а застосунок можна
+        встановити на телефон і вчити без інтернету.</p></details>
+    <details><summary>Чи є колода для Anki?</summary>
+      <p>Так, ті самі питання в тому ж порядку: <a href="https://ankiweb.net/shared/info/1194338664">колода на AnkiWeb</a>.</p></details>
+    <details><summary>Питання за розділами ПДР</summary>
+      <p><a href="ispyt/">Пробний іспит онлайн</a> · <a href="tema/">Питання за темами</a> ·
+        <a href="pdr/">Повний текст ПДР</a> · <a href="pro/">Як ми перевіряємо відповіді</a></p>
+      <ol class="seclist">
+<!--SECTIONS-->
+      </ol></details>
+  </section>
+  <footer>
+    <p><a href="privacy.html">Конфіденційність</a> · <a href="https://ankiweb.net/shared/info/1194338664">Колода Anki</a> ·
+       <a href="https://github.com/punjet/PDRAnkiDeck">GitHub</a></p>
+    <p>ГСЦ МВС, наказ № 225 від 29.10.2025. Неофіційний проєкт; тексти питань і малюнки належать ГСЦ МВС України.
+       <a href="https://github.com/punjet/PDRAnkiDeck/blob/main/NOTICE">CC BY-NC-SA 4.0</a></p>
+  </footer>
+</main>
 <noscript><p class="loading">Для роботи застосунку потрібен JavaScript.</p></noscript>
 </body>
 </html>

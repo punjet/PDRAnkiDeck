@@ -2,8 +2,8 @@
 // replaced by build_web.py); pictures go to a long-lived cache, filled on first
 // view or all at once from Settings -> Offline.
 const SHELL = "pdr-shell-__BUILD__";
-const IMG = "pdr-img-v1";
-const FILES = ["./", "index.html", "style.css", "app.js", "telemetry.js", "config.js", "vendor/ts-fsrs-5.4.2.mjs",
+const IMG = "pdr-img-v2";  // v2: descriptive file names; v1 is deleted on activate
+const FILES = ["./", "index.html", "style.css", "app.js", "telemetry.js", "config.js", "vendor/ts-fsrs-5.4.2.mjs", "vendor/minisearch-7.2.0.mjs",
                "questions.json", "manifest.webmanifest", "icon.svg", "icon-192.png", "privacy.html"];
 
 self.addEventListener("install", (e) => {
@@ -34,5 +34,7 @@ self.addEventListener("fetch", (e) => {
     if (r.ok) { const copy = r.clone(); caches.open(SHELL).then((c) => c.put(e.request, copy)); }
     return r;
   }).catch(() => caches.match(e.request, { ignoreSearch: true })
-    .then((hit) => hit || caches.match("index.html"))));
+    // Static question/section pages fall back only to themselves: the app shell
+    // at their address would load its assets from the wrong relative paths.
+    .then((hit) => hit || (/\/(q|r|pdr|tema|ispyt|pro)\//.test(url.pathname) ? Response.error() : caches.match("index.html")))));
 });

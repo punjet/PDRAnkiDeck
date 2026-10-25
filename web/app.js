@@ -18,6 +18,7 @@ const EXAM_MINUTES = 20;
 const EXAM_MAX_ERRORS = 2;
 
 const PRESETS = {
+  month: { label: "Місяць", newPerDay: 90, retention: 0.9, maxIvl: 36500, steps: ["1m", "10m"] },
   two: { label: "2 тижні", newPerDay: 175, retention: 0.9, maxIvl: 36500, steps: ["1m", "10m"] },
   one: { label: "1 тиждень", newPerDay: 350, retention: 0.92, maxIvl: 3, steps: ["10m", "1h"] },
 };
@@ -101,7 +102,33 @@ function dayEnd(t = Date.now()) {
 }
 function rollDay() {
   const k = dayKey();
-  if (S.day.key !== k) S.day = newDay(k);
+  if (S.day.key !== k) {
+    S.day = newDay(k);
+    // A pace set by the exam date is recounted each day from what is left.
+    const left = examDaysLeft();
+    if (DB && S.settings.preset === "date" && left > 0) { S.settings = paceForDays(left); makeScheduler(); save(); }
+  }
+}
+
+// Pace for an exam in `days`: new questions spread over ~70 % of the days, the rest
+// left for reviews; a week or less works like the "1 тиждень" preset (2 days of
+// reviews, intervals up to 3 days). Intervals stop at half the time left, so every
+// question comes back at least once before the exam.
+function paceForDays(days) {
+  const unseen = DB.questions.length - Object.keys(S.cards).length;
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  if (days <= 7) {
+    return { preset: "date", label: "До дати", newPerDay: clamp(Math.ceil(unseen / Math.max(1, days - 2)), 20, 600),
+             retention: 0.92, maxIvl: 3, steps: ["10m", "1h"] };
+  }
+  return { preset: "date", label: "До дати", newPerDay: clamp(Math.ceil(unseen / Math.round(days * 0.7)), 20, 400),
+           retention: 0.9, maxIvl: Math.max(3, Math.ceil(days / 2)), steps: ["1m", "10m"] };
+}
+
+// About 45 s a day for each new question per day, its reviews included.
+function hoursText(newPerDay) {
+  const h = Math.max(0.5, Math.round(newPerDay * 45 / 1800) / 2);
+  return `~${String(h).replace(".", ",")} год`;
 }
 
 // ---------- queue ----------
@@ -710,18 +737,23 @@ function tourSlides() {
         <div class="tour-grades">${g("Важко", "повторимо скоро")}${g("Добре", "як зазвичай", "on")}${g("Легко", "нескоро")}</div>
         <p>Помилка — питання повернеться за кілька хвилин, а поруч будуть схожі питання, які легко сплутати.</p>
         <p class="note">Коли звикнете, можна ввімкнути автоперехід: алгоритм сам оцінюватиме відповіді за часом і вашою історією.</p>` },
-    { emoji: "📅", title: "Скільки часу до іспиту?",
-      body: `<div class="seg" role="radiogroup" aria-label="Темп підготовки">${Object.entries(PRESETS).map(([k, p]) =>
-          `<button role="radio" aria-checked="${S.settings.preset === k}" data-tour-preset="${k}" class="${S.settings.preset === k ? "on" : ""}">
-            ${p.label}<small>${p.newPerDay} нових на день</small></button>`).join("")}</div>
-        <p class="note">${esc(PACE_NOTE[S.settings.preset] || PACE_NOTE.custom)} Змінити можна будь-коли в налаштуваннях.</p>` },
+    { emoji: "📅", title: "Коли іспит?", pace: true,
+      body: `<div class="pace-list" role="radiogroup" aria-label="Коли іспит">
+          ${[["month", "Приблизно через місяць"], ["two", "Приблизно через 2 тижні"]].map(([k, label]) =>
+            `<button role="radio" aria-checked="false" data-pace="${k}">${label}<small>${PRESETS[k].newPerDay} нових на день · ${hoursText(PRESETS[k].newPerDay)}</small></button>`).join("")}
+          <label class="btn pace-date" data-pace="date" role="radio" aria-checked="false">
+            <span>Знаю дату<small id="tourDateNote">підберемо темп саме під неї</small></span>
+            <input type="date" id="tourDate" aria-label="Дата іспиту" min="${new Date().toISOString().slice(0, 10)}">
+          </label>
+        </div>
+        <p class="note">Темп і дату можна змінити будь-коли в налаштуваннях.</p>` },
   ];
 }
 
 function showTour(from = "start") {
   if (typeof HTMLDialogElement !== "function") { S.ui.tourDone = true; save(); return; }
   const slides = tourSlides();
-  let i = 0;
+  let i = 0, picked = null;   // picked: "month" | "two" | "date" on the last card
   const d = document.createElement("dialog");
   d.className = "sheet tour";
   d.setAttribute("aria-label", "Як це працює");
@@ -732,29 +764,58 @@ function showTour(from = "start") {
       <div class="tour-emoji" aria-hidden="true">${sl.emoji}</div>
       <h2 tabindex="-1">${sl.title}</h2>
       <div class="tour-body stack">${sl.body}</div>
-      <div class="tour-nav">
-        ${last ? "" : `<button class="ghost" data-tour="skip">Пропустити</button>`}
-        <button class="primary grow" data-tour="next">${last ? (from === "start" ? "Почати навчання" : "Зрозуміло") : "Далі"}</button>
-      </div></div>`;
+      ${sl.pace ? `<div class="tour-nav col">
+        <button class="primary block" data-tour="next" ${picked ? "" : "disabled"}>${from === "start" ? "Почати навчання" : "Зберегти"}</button>
+        <button class="ghost block" data-tour="nodate">Не буду вказувати</button>
+      </div>` : `<div class="tour-nav">
+        <button class="ghost" data-tour="skip">Пропустити</button>
+        <button class="primary grow" data-tour="next">Далі</button>
+      </div>`}</div>`;
     d.querySelector("h2").focus({ preventScroll: true });
   };
   d.addEventListener("click", (e) => {
     const b = e.target.closest("button");
     if (!b) return;
-    if (b.dataset.tourPreset) {
-      S.settings = { preset: b.dataset.tourPreset, ...PRESETS[b.dataset.tourPreset] };
+    if (b.dataset.pace) {
+      picked = b.dataset.pace;
+      S.settings = { preset: picked, ...PRESETS[picked] };
+      if (S.plan.examDate) setExamDate("");   // "about a month": no exact date
       save(); makeScheduler();
-      d.querySelectorAll("[data-tour-preset]").forEach((x) => {
-        const on = x === b;
-        x.classList.toggle("on", on); x.setAttribute("aria-checked", on);
-      });
-      d.querySelector(".tour-body .note").textContent = `${PACE_NOTE[b.dataset.tourPreset]} Змінити можна будь-коли в налаштуваннях.`;
+      markPace();
       return;
     }
+    // Skipped questions keep the default pace (2 weeks) and no date.
+    if (b.dataset.tour === "nodate") return d.close("nodate");
     if (b.dataset.tour === "skip") return d.close("skip");
     if (b.dataset.tour === "next") {
       if (i === slides.length - 1) return d.close("done");
       i++; draw();
+    }
+  });
+  const markPace = () => {
+    d.querySelectorAll("[data-pace]").forEach((x) => x.setAttribute("aria-checked", x.dataset.pace === picked));
+    const go = d.querySelector('[data-tour="next"]');
+    if (go) go.disabled = !picked;
+  };
+  d.addEventListener("change", (e) => {
+    if (e.target.id !== "tourDate" || !e.target.value || e.target.value < "2020") return;
+    setExamDate(e.target.value);
+    const left = examDaysLeft();
+    if (left > 0) {
+      picked = "date";
+      d.querySelector("#tourDateNote").textContent =
+        `через ${left} ${plural(left, "день", "дні", "днів")}: ${S.settings.newPerDay} нових на день · ${hoursText(S.settings.newPerDay)}`
+        + (S.settings.newPerDay >= 400 ? ". Часу обмаль: питання йдуть від найчастіших у білеті, тож навіть частина бази дасть шанс" : "");
+    } else {
+      picked = null;
+      d.querySelector("#tourDateNote").textContent = "оберіть дату в майбутньому";
+    }
+    markPace();
+  });
+  // Desktop Chrome opens the calendar only from its icon: open it on any click.
+  d.addEventListener("click", (e) => {
+    if (e.target.id === "tourDate" && matchMedia("(pointer: fine)").matches) {
+      try { e.target.showPicker(); } catch (err) { /* already open */ }
     }
   });
   d.addEventListener("close", () => {
@@ -762,9 +823,13 @@ function showTour(from = "start") {
     d.remove();
     S.ui.tourDone = true; save();
     ev("tour", how, i + 1);
-    if (how === "done" && from === "start") go({ name: "study" });
+    if (slides[i].pace) ev("tour_pace", how === "nodate" ? "none" : picked, examDaysLeft());
+    if ((how === "done" || how === "nodate") && from === "start") go({ name: "study" });
     else if (view.name === "home" || view.name === "settings") render();
   });
+  // Marked as seen when shown, not when closed: a reload or a closed tab mid-tour
+  // should not bring it back.
+  S.ui.tourDone = true; save();
   document.body.appendChild(d);
   draw();
   d.showModal();
@@ -1264,14 +1329,23 @@ function renderDrill() {
 
 // ---- settings ----
 const PACE_NOTE = {
+  month: "~1 год на день. За 3 тижні пройдете всю базу, далі — повторення.",
   two: "~2–2,5 год на день. За 10 днів пройдете всю базу, далі — повторення.",
   one: "~4–5 год на день: 5 днів нових питань і 2 дні повторення. Інтервали не довші за 3 дні.",
   custom: "Свій темп: параметри змінено вручну.",
 };
+function paceNote(s = S.settings) {
+  if (s.preset === "date" && S.plan.examDate) {
+    const d = new Date(`${S.plan.examDate}T00:00`).toLocaleDateString("uk-UA", { day: "numeric", month: "long" });
+    return `Під іспит ${d}: ${s.newPerDay} нових на день · ${hoursText(s.newPerDay)} на день. Темп перераховується щодня.`;
+  }
+  return PACE_NOTE[s.preset] || PACE_NOTE.custom;
+}
+
 // Every field saves on change; there is no "Save" button to forget.
 function renderSettings() {
   const s = S.settings;
-  const custom = !PRESETS[s.preset];
+  const custom = s.preset === "custom";
   h(`
   ${topBar({ title: "Налаштування" })}
   <div class="stack">
@@ -1279,8 +1353,8 @@ function renderSettings() {
       <h2>Скільки часу до іспиту</h2>
       <div class="seg" role="radiogroup" aria-label="Темп підготовки">${Object.entries(PRESETS).map(([k, p]) =>
         `<button role="radio" aria-checked="${s.preset === k}" data-preset="${k}" class="${s.preset === k ? "on" : ""}">
-          ${p.label}<small>${p.newPerDay} нових на день</small></button>`).join("")}</div>
-      <p class="note" id="paceNote">${PACE_NOTE[s.preset] || PACE_NOTE.custom}</p>
+          ${p.label}<small>${p.newPerDay} на день</small></button>`).join("")}</div>
+      <p class="note" id="paceNote">${esc(paceNote(s))}</p>
       <details class="more" ${custom ? "open" : ""}>
         <summary>Додатково: параметри FSRS</summary>
         <label class="field"><span>Нових карток на день</span>
@@ -1669,11 +1743,21 @@ app.addEventListener("click", async (e) => {
   }
 });
 
+// A new exam date also sets the pace to fit it, unless the pace was set by hand
+// under "Додатково". Returns a line for a toast.
 function setExamDate(v) {
   S.plan.examDate = /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null;
-  save();
   const left = examDaysLeft();
+  let msg = S.plan.examDate ? "Дату іспиту збережено" : "Дату іспиту прибрано";
   if (left !== null) ev("exam_date", null, Math.max(-1000, Math.min(1000, left)));
+  if (left > 0 && S.settings.preset !== "custom") {
+    S.settings = paceForDays(left); makeScheduler();
+    msg = `Темп під вашу дату: ${S.settings.newPerDay} нових на день`;
+  } else if (!S.plan.examDate && S.settings.preset === "date") {
+    S.settings = { preset: "two", ...PRESETS.two }; makeScheduler();
+  }
+  save();
+  return msg;
 }
 
 // Desktop Chrome opens a date field's calendar only from its icon; open it on any click.
@@ -1699,9 +1783,9 @@ app.addEventListener("input", (e) => {
 
 app.addEventListener("change", (e) => {
   if (e.target.id === "importFile" && e.target.files[0]) importProgress(e.target.files[0]);
-  if (e.target.id === "examDateHome" && e.target.value) { setExamDate(e.target.value); render(); }
+  if (e.target.id === "examDateHome" && e.target.value) { toast(setExamDate(e.target.value)); render(); }
   // While a year is typed digit by digit (0002, 0020…) the field already reports a date.
-  if (e.target.id === "examDate" && (!e.target.value || e.target.value >= "2020")) { setExamDate(e.target.value); toast(e.target.value ? "Дату іспиту збережено" : "Дату іспиту прибрано"); }
+  if (e.target.id === "examDate" && (!e.target.value || e.target.value >= "2020")) { toast(setExamDate(e.target.value)); render(); }
   if (["newPerDay", "retention", "maxIvl"].includes(e.target.id)) saveSettingField(e.target);
 });
 

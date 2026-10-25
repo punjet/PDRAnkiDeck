@@ -139,3 +139,91 @@ export function ask(text, { ok = "Так", cancel = "Скасувати", danger
     d.querySelector("button").focus();
   });
 }
+
+// Full-screen picture with pinch / wheel zoom, drag to pan and double tap to zoom in
+// or out. Closes with ✕, Esc, the back gesture's Esc or a tap on the dark area.
+export function openImage(src, alt = "") {
+  if (typeof HTMLDialogElement !== "function") { window.open(src, "_blank"); return; }
+  const d = document.createElement("dialog");
+  d.className = "viewer";
+  d.setAttribute("aria-label", "Малюнок");
+  d.innerHTML = `
+    <img src="${esc(src)}" alt="${esc(alt)}" draggable="false">
+    <button class="viewer-close" aria-label="Закрити">${ICON.close}</button>
+    <p class="viewer-hint" aria-hidden="true">Розведіть пальці, щоб збільшити</p>`;
+  const img = d.querySelector("img");
+  let scale = 1, x = 0, y = 0;
+  const pts = new Map();
+  let pinch = null, pan = null, lastTap = 0, moved = false;
+  const MAX = 5;
+  const apply = (smooth = false) => {
+    img.style.transition = smooth ? "transform .2s ease" : "none";
+    img.style.transform = `translate(${x}px, ${y}px) scale(${scale})`;
+    d.classList.toggle("zoomed", scale > 1.01);
+  };
+  // Keep the picture from being dragged off screen.
+  // Layout size (offsetWidth) ignores the transform, so this is right mid-gesture too.
+  const clamp = () => {
+    const w = img.offsetWidth, h = img.offsetHeight;
+    const mx = Math.max(0, (w * scale - innerWidth) / 2), my = Math.max(0, (h * scale - innerHeight) / 2);
+    x = Math.min(mx, Math.max(-mx, x)); y = Math.min(my, Math.max(-my, y));
+  };
+  // Zoom to `s` keeping the screen point (cx, cy) under the finger.
+  const zoomAt = (s, cx, cy) => {
+    s = Math.min(MAX, Math.max(1, s));
+    const ox = cx - innerWidth / 2, oy = cy - innerHeight / 2;
+    x = ox - (ox - x) * (s / scale); y = oy - (oy - y) * (s / scale);
+    scale = s;
+    if (scale === 1) { x = 0; y = 0; }
+    clamp();
+  };
+  const dist = () => { const [a, b] = [...pts.values()]; return Math.hypot(a.x - b.x, a.y - b.y); };
+  const mid = () => { const [a, b] = [...pts.values()]; return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }; };
+
+  d.addEventListener("pointerdown", (e) => {
+    if (e.target.closest(".viewer-close")) return;
+    d.setPointerCapture?.(e.pointerId);
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    moved = false;
+    if (pts.size === 2) { pinch = { d: dist(), s: scale }; pan = null; }
+    else if (pts.size === 1) pan = { x: e.clientX - x, y: e.clientY - y };
+  });
+  d.addEventListener("pointermove", (e) => {
+    if (!pts.has(e.pointerId)) return;
+    const p = pts.get(e.pointerId);
+    if (Math.hypot(e.clientX - p.x, e.clientY - p.y) > 4) moved = true;
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pinch && pts.size === 2) { const m = mid(); zoomAt(pinch.s * dist() / pinch.d, m.x, m.y); apply(); }
+    else if (pan && scale > 1) { x = e.clientX - pan.x; y = e.clientY - pan.y; clamp(); apply(); }
+  });
+  const up = (e) => {
+    if (!pts.has(e.pointerId)) return;
+    pts.delete(e.pointerId);
+    if (pts.size < 2) pinch = null;
+    if (pts.size === 1) { const [p] = pts.values(); pan = { x: p.x - x, y: p.y - y }; }
+    if (pts.size || moved || e.type === "pointercancel") return;
+    const now = Date.now();
+    if (now - lastTap < 300) {   // double tap
+      lastTap = 0;
+      zoomAt(scale > 1.01 ? 1 : 2.5, e.clientX, e.clientY); apply(true);
+    } else {
+      lastTap = now;
+      // A single tap outside the picture closes it (after the double-tap window).
+      // (pointer capture makes e.target the dialog, so hit-test the picture's box instead)
+      const r = img.getBoundingClientRect();
+      const onImg = e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+      if (!onImg && scale <= 1.01) setTimeout(() => { if (lastTap === now) d.close(); }, 300);
+    }
+  };
+  d.addEventListener("pointerup", up);
+  d.addEventListener("pointercancel", up);
+  d.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    zoomAt(scale * Math.exp(-e.deltaY / 300), e.clientX, e.clientY); apply();
+  }, { passive: false });
+  d.querySelector(".viewer-close").addEventListener("click", () => d.close());
+  d.addEventListener("close", () => d.remove());
+  document.body.appendChild(d);
+  d.showModal();
+  d.querySelector(".viewer-close").focus();
+}

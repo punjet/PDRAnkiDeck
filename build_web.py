@@ -88,6 +88,29 @@ for e in out:   # a neighbour may be a question left out of category B
         if keep:
             e[k] = keep
 
+# Explanations for the app ("Чому так" after a mistake): checked ones (status "ok") from
+# explain.py, in a separate explain.json the app loads on the first mistake, so
+# questions.json stays small. Off until the explanations are ready: PDR_APP_EXPLAIN=1.
+APP_EXPLAIN = os.environ.get("PDR_APP_EXPLAIN") == "1"
+expl_path = os.path.join(DATA, "explanations.json")
+EXPL = {}
+if APP_EXPLAIN and os.path.exists(expl_path):
+    raw = json.load(open(expl_path, encoding="utf-8"))
+    for qid, e in raw.items():
+        if e.get("status") != "ok" or qid not in known_ids:
+            continue
+        EXPL[qid] = {k: e[k] for k in ("text", "steps", "trap", "what_if", "tip") if e.get(k)}
+        # wrong: base option number (1-based) -> why it is wrong; the app shows it by option text.
+        if e.get("wrong"):
+            EXPL[qid]["wrong"] = {str(int(k) - 1): v for k, v in e["wrong"].items()}
+        if e.get("rules"):
+            EXPL[qid]["rules"] = [[k, f"pdr/{build_seo.pdr_section_of(k)}/#p{k}"] for k in e["rules"]]
+    for e in out:
+        if e["id"] in EXPL:
+            e["ex"] = 1
+    with open(os.path.join(OUT, "explain.json"), "w", encoding="utf-8") as f:
+        json.dump(EXPL, f, ensure_ascii=False, separators=(",", ":"))
+
 payload = {
     "source": "ГСЦ МВС, наказ № 225 від 29.10.2025",
     "tiers": [{"n": n, "name": name} for n, name, _ in TIERS],
@@ -114,6 +137,6 @@ with open(sw, "w", encoding="utf-8") as f:
 
 seo_stats = build_seo.build(OUT, seo, sections, {k: c for k, c, _ in TICKET})
 
-print(f"{len(out)} questions ({seo_stats['explained']} explained), "
+print(f"{len(out)} questions ({seo_stats['explained']} explained, {len(EXPL)} in the app), "
       f"{seo_stats['sitemap']} pages in sitemap, "
       f"{len(os.listdir(os.path.join(OUT, 'img')))} images -> {OUT}/")

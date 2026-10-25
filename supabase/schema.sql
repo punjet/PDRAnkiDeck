@@ -203,3 +203,51 @@ create index if not exists exams_uid_idx   on public.exams (uid, created_at);
 create index if not exists pings_sid_idx   on public.pings (sid, seq);
 create index if not exists pings_uid_idx   on public.pings (uid, created_at);
 create index if not exists events_uid_idx  on public.events (uid, created_at);
+
+-- ---------- progress transfer between devices (app: Settings -> "Перенести на інший пристрій") ----------
+-- The app gzips and encrypts its progress with AES-GCM in the browser; the key stays in
+-- the link's #fragment, which never reaches a server. Here sits only the ciphertext,
+-- under a random 12-character code, for at most a day and for one read.
+create table if not exists public.transfers (
+  code       text primary key check (code ~ '^[a-z2-7]{12}$'),
+  blob       text not null check (length(blob) <= 512000),   -- real progress: tens of KB
+  created_at timestamptz not null default now()
+);
+alter table public.transfers enable row level security;
+revoke all on public.transfers from anon, authenticated;
+
+create or replace function public.transfer_put(code text, blob text)
+returns void
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  delete from public.transfers where created_at < now() - interval '1 day';
+  -- Caps for anyone holding the public key: the number and total size of pending
+  -- transfers, so the table never outgrows ~100 MB. (No per-address cap: privacy.html
+  -- promises that IP addresses are not written to the database.)
+  if (select count(*) from public.transfers) >= 2000
+     or (select coalesce(sum(length(t.blob)), 0) from public.transfers t) + length(transfer_put.blob) > 100000000 then
+    raise exception 'too many pending transfers';
+  end if;
+  insert into public.transfers (code, blob) values (transfer_put.code, transfer_put.blob);
+end;
+$$;
+
+-- Returns the ciphertext once and deletes it; null if unknown, used or older than a day.
+create or replace function public.transfer_get(code text)
+returns text
+language sql
+security definer
+set search_path = ''
+as $$
+  delete from public.transfers t
+  where t.code = transfer_get.code and t.created_at >= now() - interval '1 day'
+  returning t.blob;
+$$;
+
+revoke all on function public.transfer_put(text, text) from public;
+revoke all on function public.transfer_get(text) from public;
+grant execute on function public.transfer_put(text, text) to anon;
+grant execute on function public.transfer_get(text) to anon;

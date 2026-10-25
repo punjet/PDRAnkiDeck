@@ -265,3 +265,40 @@ alter table public.events add constraint events_kind_check
   check (kind in ('auto_offer', 'block_break', 'block_more', 'block_rest', 'bonus', 'exam_date', 'goal_done', 'ics', 'install_click', 'install_done', 'install_later', 'install_shown', 'search', 'share', 'tour', 'tour_pace', 'train_topic', 'transfer', 'twin_open', 'zoom'));
 -- Keep these lists in step with the app: one row with an unknown value makes ingest() reject
 -- the whole batch it came in. Event kinds are the first argument of ev(...) in web/app.js.
+
+-- ---------- sync between devices for people signed in with Google (web/sync.js) ----------
+-- One row per account: the app's progress, gzipped JSON in base64 (tens of KB). Row Level
+-- Security: a signed-in person reads and writes only their own row; the public key alone
+-- (no sign-in) gets nothing. Deleting the account deletes the row.
+-- Setup: Authentication -> Providers -> Google (client id and secret from Google Cloud),
+-- Authentication -> URL Configuration: Site URL https://zdaipdr.com.ua, redirect URL
+-- https://zdaipdr.com.ua/** .
+create table if not exists public.progress (
+  user_id    uuid primary key references auth.users (id) on delete cascade,
+  data       text not null check (length(data) <= 2000000),
+  updated_at timestamptz not null default now()
+);
+alter table public.progress enable row level security;
+revoke all on public.progress from anon;
+grant select, insert, update, delete on public.progress to authenticated;
+drop policy if exists progress_select on public.progress;
+drop policy if exists progress_insert on public.progress;
+drop policy if exists progress_update on public.progress;
+drop policy if exists progress_delete on public.progress;
+create policy progress_select on public.progress for select to authenticated using (user_id = (select auth.uid()));
+create policy progress_insert on public.progress for insert to authenticated with check (user_id = (select auth.uid()));
+create policy progress_update on public.progress for update to authenticated
+  using (user_id = (select auth.uid())) with check (user_id = (select auth.uid()));
+create policy progress_delete on public.progress for delete to authenticated using (user_id = (select auth.uid()));
+
+-- "Видалити мій акаунт": the account (email) and, by the cascade, the synced progress.
+create or replace function public.delete_me()
+returns void
+language sql
+security definer
+set search_path = ''
+as $$
+  delete from auth.users where id = (select auth.uid());
+$$;
+revoke all on function public.delete_me() from public, anon;
+grant execute on function public.delete_me() to authenticated;

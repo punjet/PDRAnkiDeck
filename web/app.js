@@ -4,6 +4,7 @@
 import { fsrs, generatorParameters, createEmptyCard, Rating, State }
   from "./vendor/ts-fsrs-5.4.2.mjs";
 import * as tele from "./telemetry.js";
+import { SUPABASE_URL, GOOGLE_SYNC } from "./config.js";
 import MiniSearch from "./vendor/minisearch-7.2.0.mjs";
 import * as grader from "./grade.js";
 import { esc, plural, clipText, shuffle, ICON, topBar, dock, emptyState, announce, toast,
@@ -70,13 +71,14 @@ function load() {
 }
 
 let saveFailed = false;
-function save() {
+function save(sync = true) {
   try {
     localStorage.setItem(STORE_KEY, JSON.stringify(S));
     saveFailed = false;
   } catch (e) {
     saveFailed = true;
   }
+  if (sync) scheduleSync();
 }
 
 function makeScheduler() {
@@ -1539,9 +1541,11 @@ function renderSettings() {
       <button class="block" data-act="offline" id="offlineBtn">Зберегти для офлайну</button>
     </section>
 
+    ${syncSectionHtml()}
     <section class="card stack">
       <h2>Прогрес</h2>
-      <p class="note">Прогрес зберігається лише в цьому браузері. Перенесіть його на телефон чи комп'ютер за QR-кодом
+      <p class="note">${SYNC.on ? "Копія зберігається в цьому браузері й у хмарі. Без входу перенести прогрес можна"
+        : "Без входу прогрес зберігається лише в цьому браузері. Перенесіть його"} на телефон чи комп'ютер за QR-кодом
         або посиланням — без реєстрації.</p>
       <button class="primary block" data-act="transfer">📲 Перенести на інший пристрій</button>
       <details class="more"><summary>Отримати прогрес з іншого пристрою</summary>
@@ -1877,6 +1881,7 @@ app.addEventListener("click", async (e) => {
     if (await ask("Видалити весь прогрес, історію іспитів і помилки? Це не можна скасувати.", { ok: "Видалити все", danger: true })) {
       const keep = { tele: S.tele, plan: S.plan, ui: S.ui };
       S = { ...defaultState(), ...keep, grade: grader.newModel(), firstSeen: Date.now() }; save(); makeScheduler(); applyMotion(); go({ name: "home" });
+      if (SYNC.on) syncNow();   // write the empty copy over the cloud one (no merge back)
     }
     return;
   }
@@ -1897,6 +1902,20 @@ app.addEventListener("click", async (e) => {
   if (act === "back") return go(view.back || { name: "home" });
   if (act === "tour") return showTour("settings");
   if (act === "transfer") return showTransfer();
+  if (act === "sync-login") { (await loadSync()).login(); return; }
+  if (act === "sync-now") return syncNow({ pull: true, manual: true });
+  if (act === "sync-logout") {
+    await syncNow();   // save the last changes to the cloud first
+    await (await loadSync()).logout();
+    SYNC.on = false; SYNC.email = null; SYNC.at = 0; SYNC.lastSent = "";
+    toast("Ви вийшли. Прогрес на цьому пристрої залишився"); return render();
+  }
+  if (act === "sync-delete") {
+    if (!(await ask("Видалити акаунт, пошту й прогрес у хмарі? Прогрес на цьому пристрої залишиться.", { ok: "Видалити", danger: true }))) return;
+    try { await (await loadSync()).deleteAccount(); toast("Акаунт і дані в хмарі видалено"); }
+    catch (e) { toast("Не вдалося видалити — спробуйте пізніше"); return; }
+    SYNC.on = false; SYNC.email = null; SYNC.at = 0; SYNC.lastSent = ""; return render();
+  }
   if (act === "xfer-in") {
     const v = document.getElementById("xferIn")?.value.trim() || "";
     const hash = v.slice(v.indexOf("#"));
@@ -2214,6 +2233,145 @@ function applyState(state) {
   save(); makeScheduler(); applyMotion(); go({ name: "home" });
 }
 
+// ---- sign-in with Google and sync between devices (sync.js, loaded on demand) ----
+// Cheap by design: the cloud copy is read when the app opens (or comes back after a while)
+// and written ~30 s after the last change, at least every 3 minutes of steady study.
+// Copies are merged, never replaced, so two devices never wipe each other's work.
+const loadSync = () => import("./sync.js");
+const SYNC = { on: false, email: null, timer: null, firstDirty: 0, busy: false, lastPull: 0, lastSent: "", at: 0 };
+const hasAuth = () => { try { return !!localStorage.getItem("pdr-auth"); } catch (e) { return false; } };
+
+function syncPayload() {
+  const { tele, ...rest } = S;   // the anonymous telemetry id never goes with the account
+  return { ...rest, logs: S.logs.slice(-4000) };
+}
+
+// Union of two copies of the progress: per question the more recent card, all answers,
+// exams and mistakes; settings from the copy used last.
+function mergeStates(a, b) {
+  const t = (iso) => (iso ? Date.parse(iso) || 0 : 0);
+  const cards = { ...a.cards };
+  for (const [id, c] of Object.entries(b.cards || {})) {
+    const m = cards[id];
+    if (!m || t(c.last_review) > t(m.last_review) || (t(c.last_review) === t(m.last_review) && (c.reps || 0) > (m.reps || 0))) cards[id] = c;
+  }
+  const lk = (l) => `${l[0]}@${l[1]}`;
+  const seen = new Set(a.logs.map(lk));
+  const logs = [...a.logs, ...(b.logs || []).filter((l) => !seen.has(lk(l)))].sort((x, y) => x[1] - y[1]);
+  const wrong = { ...a.wrong };
+  for (const [id, v] of Object.entries(b.wrong || {})) wrong[id] = Math.max(wrong[id] || 0, v);
+  const ex = new Map([...a.exams, ...(b.exams || [])].map((e) => [`${e.at}`, e]));
+  const days = { ...a.days };
+  for (const [k, v] of Object.entries(b.days || {})) days[k] = Math.max(days[k] || 0, v);
+  const bd = b.day || a.day;
+  const day = a.day.key === bd.key
+    ? { ...a.day, ...Object.fromEntries(["newDone", "reviewsDone", "answers", "correct", "bonus"].map((k) => [k, Math.max(a.day[k] || 0, bd[k] || 0)])),
+        goalDone: a.day.goalDone || bd.goalDone }
+    : (a.day.key > bd.key ? a.day : bd);
+  const last = (s) => Math.max(0, ...(s.logs || []).slice(-1).map((l) => l[1] * 1000), ...(s.exams || []).map((e) => e.at));
+  const newer = last(b) > last(a) ? b : a;
+  return {
+    ...a,
+    settings: newer.settings, prefs: newer.prefs, plan: newer.plan, grade: newer.grade || a.grade,
+    ui: { ...a.ui, tourDone: a.ui.tourDone || !!b.ui?.tourDone },
+    cards, logs, wrong, days, day,
+    exams: [...ex.values()].sort((x, y) => x.at - y.at),
+    best: Object.fromEntries([...new Set([...Object.keys(a.best || {}), ...Object.keys(b.best || {})])]
+      .map((k) => [k, Math.max(a.best?.[k] || 0, b.best?.[k] || 0)])),
+    firstSeen: Math.min(a.firstSeen || Date.now(), b.firstSeen || Date.now()),
+    tele: a.tele,
+  };
+}
+
+function scheduleSync(ms = 30000) {
+  if (!SYNC.on) return;
+  if (!SYNC.firstDirty) SYNC.firstDirty = Date.now();
+  clearTimeout(SYNC.timer);
+  // Steady study keeps pushing the timer back: write at least every 3 minutes anyway.
+  const wait = Math.max(0, Math.min(ms, SYNC.firstDirty + 180000 - Date.now()));
+  SYNC.timer = setTimeout(() => syncNow(), wait);
+}
+
+// pull: read and merge the cloud copy first (on open, on return, by hand); then write.
+async function syncNow({ pull = false, manual = false } = {}) {
+  if (!SYNC.on || SYNC.busy) return;
+  if (!navigator.onLine) { if (manual) toast("Немає інтернету — синхронізуємо, коли з'явиться"); return; }
+  SYNC.busy = true;
+  clearTimeout(SYNC.timer);
+  try {
+    const sy = await loadSync();
+    if (pull) {
+      const remote = await sy.pull();
+      SYNC.lastPull = Date.now();
+      if (remote) {
+        const before = JSON.stringify(S);
+        S = { ...defaultState(), ...mergeStates(S, sanitizeState(remote.state)) };
+        normalize();
+        if (JSON.stringify(S) !== before) {
+          save(false); makeScheduler();
+          if (["home", "settings"].includes(view.name)) render();
+        }
+      }
+    }
+    const payload = JSON.stringify(syncPayload());
+    if (payload !== SYNC.lastSent) { await sy.push(JSON.parse(payload)); SYNC.lastSent = payload; }
+    SYNC.firstDirty = 0;
+    SYNC.at = Date.now();
+    if (manual) toast("✅ Синхронізовано");
+  } catch (e) {
+    if (e.signedOut) { SYNC.on = false; SYNC.email = null; toast("Сесія завершилась — увійдіть знову в налаштуваннях"); }
+    else if (manual) toast("Не вдалося синхронізувати — спробуйте пізніше");
+  } finally {
+    SYNC.busy = false;
+    if (view.name === "settings") render();
+  }
+}
+
+async function startSync() {
+  if (/[#&](access_token|error)=/.test(location.hash)) {
+    const sy = await loadSync();
+    const res = await sy.handleRedirect();
+    if (res === "in") {
+      SYNC.on = true; SYNC.email = sy.account()?.email || null;
+      toast(`Ви увійшли${SYNC.email ? ` як ${SYNC.email}` : ""}. Об'єднуємо прогрес…`);
+      await syncNow({ pull: true });
+      if (SYNC.at) toast("✅ Прогрес синхронізовано");
+    } else if (res === "error") toast("Не вдалося увійти через Google — спробуйте ще раз");
+    return true;
+  }
+  if (hasAuth()) {
+    const sy = await loadSync();
+    SYNC.on = sy.signedIn(); SYNC.email = sy.account()?.email || null;
+    if (SYNC.on) syncNow({ pull: true });
+  }
+  return false;
+}
+
+function syncSectionHtml() {
+  if (!SUPABASE_URL || (!GOOGLE_SYNC && !SYNC.on)) return "";
+  const when = SYNC.at ? new Date(SYNC.at).toLocaleTimeString("uk-UA", { hour: "2-digit", minute: "2-digit" }) : null;
+  return SYNC.on ? `
+    <section class="card stack">
+      <h2>Синхронізація</h2>
+      <p>Ви увійшли як <b>${esc(SYNC.email || "користувач Google")}</b>. Прогрес однаковий на всіх пристроях, де ви увійшли.</p>
+      <p class="note">${SYNC.busy ? "Синхронізуємо…" : when ? `Останнє збереження в хмару: ${when}.` : "Ще не синхронізовано."}</p>
+      <div class="actions two">
+        <button data-act="sync-now">Синхронізувати</button>
+        <button data-act="sync-logout">Вийти</button>
+      </div>
+      <details class="more"><summary>Видалити акаунт</summary>
+        <p class="note">Видалить вашу пошту й прогрес у хмарі. Прогрес на цьому пристрої залишиться.</p>
+        <button class="block text-bad" data-act="sync-delete">Видалити акаунт і дані в хмарі</button>
+      </details>
+    </section>` : `
+    <section class="card stack">
+      <h2>Синхронізація</h2>
+      <p class="note">Увійдіть, щоб прогрес був однаковий на телефоні й комп'ютері й не пропав, якщо очистити браузер.
+        Безкоштовно. Ми зберігаємо лише вашу пошту й прогрес навчання — <a href="privacy.html">деталі</a>.</p>
+      <button class="primary block" data-act="sync-login">Увійти через Google</button>
+    </section>`;
+}
+
 // ---- transfer to another device (transfer.js, loaded on demand) ----
 const loadTransfer = () => import("./transfer.js");
 
@@ -2365,16 +2523,23 @@ async function boot() {
   if (topicParam && topicById[topicParam]) view = { name: "topic", id: topicParam, back: { name: "home" } };
   render();
   startSession();
+  // Sync must never stop the app from starting (offline, server down, old session).
+  const fromSignIn = await startSync().catch(() => false);
   // A transfer link (#xfer=… / #xferdata=…) brings progress from another device.
-  if (/^#xfer(data)?=/.test(location.hash)) receiveTransfer();
+  if (fromSignIn) { /* nothing else to open */ }
+  else if (/^#xfer(data)?=/.test(location.hash)) receiveTransfer();
   else if (!S.ui.tourDone && !S.logs.length && view.name === "home") showTour("start");
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 }
 
 document.addEventListener("visibilitychange", () => {
   if (!DB) return;
+  if (SYNC.on && document.visibilityState === "hidden" && SYNC.firstDirty) syncNow();
+  if (SYNC.on && document.visibilityState === "visible" && Date.now() - SYNC.lastPull > 120000) syncNow({ pull: true });
   updateBadge();
   if (document.visibilityState === "visible" && view.name === "home") render();
 });
+
+addEventListener("online", () => { if (SYNC.on && SYNC.firstDirty) syncNow(); });
 
 boot();

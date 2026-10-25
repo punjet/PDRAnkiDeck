@@ -28,7 +28,7 @@ from urllib.parse import urlparse
 
 SITE = os.environ.get("SITE_URL", "https://zdaipdr.com.ua/")
 YEAR = str(datetime.date.today().year)
-APP_NAME = "ПДР України — категорія B"
+APP_NAME = "Здай ПДР"
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
 

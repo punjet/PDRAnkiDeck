@@ -3,7 +3,7 @@
 // sign-in is a redirect to Supabase, which sends the person to Google and back here with
 // the session in the URL #fragment; data goes through plain REST calls.
 // Loaded on demand (import()) from app.js, only for people who sign in.
-import { SUPABASE_URL, SUPABASE_KEY } from "./config.js";
+import { SUPABASE_URL, SUPABASE_KEY, GOOGLE_CLIENT_ID } from "./config.js";
 
 const AUTH_KEY = "pdr-auth";   // { access, refresh, exp (unix s), email, id }
 
@@ -24,7 +24,62 @@ export function login() {
   location.href = `${SUPABASE_URL}/auth/v1/authorize?provider=google&redirect_to=${encodeURIComponent(back)}`;
 }
 
-// After the redirect back: #access_token=…&refresh_token=…&expires_in=… (or #error=…).
+// ---------- sign-in on the page itself: Google's own button (Google Identity Services) ----------
+// The person picks the account in Google's popup without leaving the site; Google returns an ID
+// token for our client, Supabase checks it and opens a session. The Google consent text names
+// our domain (zdaipdr.com.ua), not the database's, and the script is loaded only for this button.
+let gsiLoading = null;
+function loadGsi() {
+  gsiLoading ||= new Promise((ok, fail) => {
+    const s = document.createElement("script");
+    s.src = "https://accounts.google.com/gsi/client";
+    s.async = true;
+    s.onload = () => (window.google?.accounts?.id ? ok() : fail(new Error("gsi")));
+    s.onerror = () => { gsiLoading = null; fail(new Error("gsi blocked")); };
+    document.head.appendChild(s);
+  });
+  return gsiLoading;
+}
+
+const hex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+
+// Renders the button into `el`; onSignedIn(account) after a successful sign-in, onError(e) else.
+export async function mountGoogleButton(el, { dark = false, onSignedIn, onError } = {}) {
+  await loadGsi();
+  // Nonce: Google puts the hash in the token, Supabase gets the raw value and compares.
+  const raw = hex(crypto.getRandomValues(new Uint8Array(16)));
+  const hashed = hex(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(raw)));
+  google.accounts.id.initialize({
+    client_id: GOOGLE_CLIENT_ID,
+    nonce: hashed,
+    ux_mode: "popup",
+    use_fedcm_for_button: true,
+    callback: async (resp) => {
+      try { onSignedIn?.(await loginWithIdToken(resp.credential, raw)); }
+      catch (e) { onError?.(e); }
+    },
+  });
+  el.innerHTML = "";
+  google.accounts.id.renderButton(el, {
+    type: "standard", theme: dark ? "filled_black" : "outline", size: "large", shape: "pill",
+    text: "signin_with", logo_alignment: "left", locale: "uk", width: Math.min(400, el.clientWidth || 320),
+  });
+}
+
+export async function loginWithIdToken(idToken, nonce) {
+  const r = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=id_token`, {
+    method: "POST", headers: { apikey: SUPABASE_KEY, "Content-Type": "application/json" },
+    body: JSON.stringify({ provider: "google", id_token: idToken, nonce }) });
+  if (!r.ok) throw new Error(`id_token ${r.status}`);
+  const d = await r.json();
+  const a = { access: d.access_token, refresh: d.refresh_token,
+              exp: Math.floor(Date.now() / 1000) + Number(d.expires_in || 3600),
+              email: d.user?.email, id: d.user?.id };
+  writeAuth(a);
+  return { email: a.email, id: a.id };
+}
+
+// After the redirect back (the older flow, kept for links already open): #access_token=…&refresh_token=…&expires_in=… (or #error=…).
 // Returns "in", "error" or null when the URL has nothing for us.
 export async function handleRedirect() {
   const h = new URLSearchParams(location.hash.slice(1));

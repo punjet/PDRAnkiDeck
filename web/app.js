@@ -482,7 +482,7 @@ async function shareApp(where, text) {
   const url = `${siteUrl()}?src=share_${where}`;
   try {
     if (navigator.share) {
-      await navigator.share({ title: "Тести ПДР — категорія B", text, url });
+      await navigator.share({ title: "Здай ПДР — тести ПДР, категорія B", text, url });
       ev("share", where, 1);
     } else {
       await navigator.clipboard.writeText(`${text} ${url}`);
@@ -984,7 +984,7 @@ function renderHome() {
 
   h(`
   <header class="top">
-    <h1 class="brand" tabindex="-1">ПДР <span>· категорія B</span></h1>
+    <h1 class="brand" tabindex="-1"><img class="brand-logo" src="icon.svg" alt="" width="28" height="28">Здай ПДР <span>· категорія B</span></h1>
     ${streak.n ? `<span class="streak ${streak.doneToday ? "" : "risk"}" title="Днів поспіль"
       aria-label="${streak.n} ${plural(streak.n, "день", "дні", "днів")} поспіль">🔥 ${streak.n}</span>` : ""}
     <button class="icon-btn" data-go="settings" aria-label="Налаштування" title="Налаштування">${ICON.gear}</button>
@@ -1563,6 +1563,7 @@ function renderSettings() {
     <button class="block" data-act="tour">Як це працює</button>
     <footer><p><a href="privacy.html">Конфіденційність</a> · <a href="https://github.com/punjet/PDRAnkiDeck">GitHub</a></p></footer>
   </div>`);
+  mountGoogle();
 }
 
 // Pace fields under "Додатково": any edit turns the preset into "custom".
@@ -2368,8 +2369,29 @@ function syncSectionHtml() {
       <h2>Синхронізація</h2>
       <p class="note">Увійдіть, щоб прогрес був однаковий на телефоні й комп'ютері й не пропав, якщо очистити браузер.
         Безкоштовно. Ми зберігаємо лише вашу пошту й прогрес навчання — <a href="privacy.html">деталі</a>.</p>
-      <button class="primary block" data-act="sync-login">Увійти через Google</button>
+      <div id="gsiBtn" class="gsi-btn"><p class="muted small">Завантажуємо вхід через Google…</p></div>
     </section>`;
+}
+
+// Google's sign-in button (sync.js) on the settings screen, when signed out.
+function mountGoogle() {
+  const el = document.getElementById("gsiBtn");
+  if (!el || SYNC.on || !GOOGLE_SYNC) return;
+  const dark = matchMedia("(prefers-color-scheme: dark)").matches && document.documentElement.dataset.theme !== "light";
+  loadSync().then((sy) => sy.mountGoogleButton(el, {
+    dark,
+    onSignedIn: async (acc) => {
+      SYNC.on = true; SYNC.email = acc.email || null;
+      toast(`Ви увійшли${SYNC.email ? ` як ${SYNC.email}` : ""}. Об'єднуємо прогрес…`);
+      await syncNow({ pull: true });
+      if (SYNC.at) toast("✅ Прогрес синхронізовано");
+      if (view.name === "settings") render();
+    },
+    onError: () => toast("Не вдалося увійти через Google — спробуйте ще раз"),
+  })).catch(() => {
+    el.innerHTML = `<p class="note">Не вдалося завантажити вхід Google. Можливо, його блокує розширення браузера
+      (блокувальник реклами) — вимкніть його для цього сайту й оновіть сторінку.</p>`;
+  });
 }
 
 // ---- transfer to another device (transfer.js, loaded on demand) ----

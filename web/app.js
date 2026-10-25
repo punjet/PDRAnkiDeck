@@ -5,6 +5,8 @@ import { fsrs, generatorParameters, createEmptyCard, Rating, State }
   from "./vendor/ts-fsrs-5.4.2.mjs";
 import * as tele from "./telemetry.js";
 import MiniSearch from "./vendor/minisearch-7.2.0.mjs";
+import { esc, plural, clipText, shuffle, ICON, topBar, dock, emptyState, announce, toast,
+  confetti as confettiRaw, ask } from "./ui.js";
 
 const APP_VER = "1.4";
 const STORE_KEY = "pdr-b-v1";
@@ -410,6 +412,9 @@ function readyNow() {
   return { pct, gain: pct - S.day.ready0 };
 }
 
+// Early on the chance is near 0 % whatever you do; showing it then only discourages.
+const chanceShown = ({ pct }) => S.logs.length >= 20 && (pct >= 5 || S.logs.length >= 300);
+
 function readyHtml({ pct, gain }) {
   const color = pct >= 90 ? "var(--ok)" : pct >= 50 ? "var(--warn)" : "var(--bad)";
   return `
@@ -447,7 +452,7 @@ async function shareApp(where, text) {
     } else {
       await navigator.clipboard.writeText(`${text} ${url}`);
       ev("share", where, 0);
-      alert("Посилання скопійовано — надішліть його другу.");
+      toast("Посилання скопійовано — надішліть його другу");
     }
   } catch (e) { /* share sheet closed */ }
 }
@@ -555,12 +560,16 @@ function trackAnswer(q, mode, chosen, rtMs, rating = null, before = null, extra 
 }
 
 // ---------- helpers ----------
-const esc = (s) => String(s).replace(/[&<>"']/g, (c) =>
-  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-
+// Draws a screen. After a screen change (go) focus moves to its heading, so keyboard
+// and screen-reader users start at the top of the new screen instead of nowhere.
+let focusNext = false;
 function h(html) {
   app.innerHTML = html;
   window.scrollTo(0, 0);
+  if (focusNext) {
+    focusNext = false;
+    app.querySelector("h1[tabindex], h2[tabindex], h1, h2")?.focus({ preventScroll: true });
+  }
   // Bars are drawn at their previous width, then grow to the new one.
   requestAnimationFrame(() => requestAnimationFrame(() =>
     app.querySelectorAll("[data-w], [data-off]").forEach((el) => {
@@ -577,6 +586,8 @@ function barSpan(key, pct, cls = "", style = "") {
 }
 
 const motionOn = () => S.prefs.motion && !matchMedia("(prefers-reduced-motion: reduce)").matches;
+const applyMotion = () => document.documentElement.classList.toggle("no-motion", !S.prefs.motion);
+const confetti = () => { if (motionOn()) confettiRaw(); };
 
 // Screen changes cross-fade; the next question slides in (View Transitions, where supported).
 function vt(fn, kind = "nav") {
@@ -591,6 +602,7 @@ function go(v) {
   if (timerHandle) { clearInterval(timerHandle); timerHandle = null; }
   cancelAuto();
   view = v;
+  focusNext = true;
   vt(render);
 }
 
@@ -614,46 +626,6 @@ function cancelAuto() {
 }
 
 // ---- small rewards ----
-function toast(text) {
-  const el = document.createElement("div");
-  el.className = "toast";
-  el.setAttribute("role", "status");
-  el.textContent = text;
-  document.body.appendChild(el);
-  setTimeout(() => el.classList.add("out"), 2400);
-  setTimeout(() => el.remove(), 2900);
-}
-
-function confetti() {
-  if (!motionOn()) return;
-  const c = document.createElement("canvas");
-  c.className = "confetti";
-  const dpr = Math.min(2, devicePixelRatio || 1);
-  c.width = innerWidth * dpr; c.height = innerHeight * dpr;
-  document.body.appendChild(c);
-  const g = c.getContext("2d");
-  g.scale(dpr, dpr);
-  const colors = ["#1d4ed8", "#157a3c", "#f0a53a", "#c0262d", "#5b8cff", "#4cc47d"];
-  const parts = Array.from({ length: 110 }, () => ({
-    x: innerWidth / 2, y: innerHeight * 0.35,
-    vx: (Math.random() - 0.5) * 14, vy: -Math.random() * 13 - 4,
-    r: Math.random() * Math.PI, vr: (Math.random() - 0.5) * 0.4,
-    w: 6 + Math.random() * 6, h: 3 + Math.random() * 4, col: colors[Math.floor(Math.random() * colors.length)],
-  }));
-  const t0 = performance.now();
-  (function frame(t) {
-    const k = (t - t0) / 1800;
-    g.clearRect(0, 0, innerWidth, innerHeight);
-    g.globalAlpha = Math.max(0, 1 - k * k);
-    for (const p of parts) {
-      p.vy += 0.35; p.vx *= 0.99; p.x += p.vx; p.y += p.vy; p.r += p.vr;
-      g.save(); g.translate(p.x, p.y); g.rotate(p.r); g.fillStyle = p.col;
-      g.fillRect(-p.w / 2, -p.h / 2, p.w, p.h); g.restore();
-    }
-    if (k < 1) requestAnimationFrame(frame); else c.remove();
-  })(t0);
-}
-
 const MILESTONES = [50, 100, 250, 500, 1000, 1500];
 function checkMilestone() {
   const { known } = progressCounts();
@@ -667,22 +639,7 @@ function checkMilestone() {
 
 function streakToast() {
   const n = streakInfo().n;
-  toast(n >= 2 ? `🔥 ${n} ${plural(n, "день", "дні", "днів")} поспіль — серію продовжено!` : "🔥 Перший день серії. Повертайтеся завтра!");
-}
-
-function shuffle(a) {
-  for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [a[i], a[j]] = [a[j], a[i]];
-  }
-  return a;
-}
-
-function plural(n, one, few, many) {
-  const m10 = n % 10, m100 = n % 100;
-  if (m10 === 1 && m100 !== 11) return one;
-  if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return few;
-  return many;
+  toast(n >= 2 ? `🔥 ${n} ${plural(n, "день", "дні", "днів")} поспіль — серію продовжено!` : "🔥 Перший день серії!");
 }
 
 function questionHtml(q) {
@@ -700,10 +657,13 @@ function questionHtml(q) {
 // options cite other options by number ("Відповіді 1 і 2", 13 % of the base). Kept in
 // place: summary options like "Усе вищеперелічене" / "Жодного з них".
 const NUM_REF = /(відповід|варіант)[^.]*\d/i;
+// Options that are only picture numbers ("1.", "1 і 4."): shuffled, the badge number and
+// the text number disagree ("2 · 1 і 4."), so they keep the base order.
+const PIC_NUMS = /^\s*\d+(\s*(,|і|й|та)\s*\d+)*\.?\s*$/;
 const SUMMARY = /^(усі|всі|все|усе|жод\S*|обидва|обидві)\b.*(відповід|варіант|перелічен|перерахован|наведен|вище|них)|вищеперелічен|вищеперерахован|вищенаведен/i;
 function makePerm(q) {
   const ids = q.o.map((_, i) => i);
-  if (!S.prefs.shuffle || q.o.some((o) => NUM_REF.test(o))) return ids;
+  if (!S.prefs.shuffle || q.o.some((o) => NUM_REF.test(o)) || q.o.every((o) => PIC_NUMS.test(o))) return ids;
   const free = ids.filter((i) => !SUMMARY.test(q.o[i]));
   const mixed = shuffle([...free]);
   return ids.map((i) => (free.includes(i) ? mixed.shift() : i));
@@ -724,6 +684,27 @@ function optionsHtml(q, { chosen = null, reveal = false, selected = null, perm =
     return `<li><button class="${cls}" data-opt="${i}" ${reveal ? "disabled" : ""}>
       <span class="n">${pos + 1}</span><span>${esc(q.o[i])}</span></button></li>`;
   }).join("")}</ul>`;
+}
+
+// The question with its options and, once answered, the verdict. Study, drill, topic
+// practice and the exam all show a question this way; `right` / `wrong` add a line
+// to the verdict, `extra` goes under it (look-alike questions).
+function quizCard(q, { chosen, perm, anim = false, right = "", wrong = "", extra = "" }) {
+  const answered = chosen !== null && chosen !== undefined;
+  const ok = answered && chosen === q.a;
+  return `
+  <article class="card qcard">
+    ${questionHtml(q)}
+    ${optionsHtml(q, { chosen, reveal: answered, perm, anim })}
+    ${answered ? `<p class="verdict ${ok ? "ok" : "bad"}">${ok ? `Правильно.${right}`
+      : `Неправильно. Правильна відповідь — ${shownNo(perm, q.a)}.${wrong}`}</p>` : ""}
+    ${answered && !ok ? extra : ""}
+  </article>`;
+}
+
+// Screen readers hear the verdict once, right after the answer.
+function announceVerdict(q, chosen, perm) {
+  announce(chosen === q.a ? "Правильно" : `Неправильно. Правильна відповідь ${shownNo(perm, q.a)}: ${q.o[q.a]}`);
 }
 
 // ---------- views ----------
@@ -751,7 +732,6 @@ function tierStats() {
   return rows;
 }
 
-const GEAR = `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`;
 
 // Today's goal as a ring: drawn at its previous value, then turns to the new one (see h()).
 function ringHtml(pct, done) {
@@ -795,7 +775,7 @@ function renderHome() {
     <input type="date" id="examDateHome" aria-label="Дата іспиту" min="${new Date().toISOString().slice(0, 10)}"></label>`);
   else if (left > 0) meta.push(`<span>До іспиту <b>${left} ${plural(left, "день", "дні", "днів")}</b></span>`);
   else if (left === 0) meta.push(`<span><b>Іспит сьогодні</b> — удачі!</span>`);
-  if (S.logs.length >= 20) {
+  if (chanceShown(chance)) {
     const c = chance.pct >= 90 ? "ok" : chance.pct >= 50 ? "warn" : "bad";
     meta.push(`<span>Шанс скласти <b class="t-${c}">${chance.pct}%</b>${chance.gain > 0 ? ` <small class="gain">+${chance.gain}</small>` : ""}</span>`);
   }
@@ -807,15 +787,13 @@ function renderHome() {
   }).join("");
 
   h(`
-  <div class="top home-top">
-    <h1 class="brand">ПДР <span>· категорія B</span></h1>
-    ${streak.n ? `<span class="streak ${streak.doneToday ? "" : "risk"}" title="Днів поспіль">🔥 ${streak.n}</span>` : ""}
-    <button class="icon-btn" data-go="settings" aria-label="Налаштування" title="Налаштування">${GEAR}</button>
-  </div>
-  <button class="search-bar" data-go="search">
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
-    Пошук питань і тем
-  </button>
+  <header class="top">
+    <h1 class="brand" tabindex="-1">ПДР <span>· категорія B</span></h1>
+    ${streak.n ? `<span class="streak ${streak.doneToday ? "" : "risk"}" title="Днів поспіль"
+      aria-label="${streak.n} ${plural(streak.n, "день", "дні", "днів")} поспіль">🔥 ${streak.n}</span>` : ""}
+    <button class="icon-btn" data-go="settings" aria-label="Налаштування" title="Налаштування">${ICON.gear}</button>
+  </header>
+  <button class="search-bar" data-go="search">${ICON.search} Пошук питань і тем</button>
   <div class="stack">
     ${outcomeHtml()}
     <section class="card hero">
@@ -854,7 +832,8 @@ function renderHome() {
 
     <section class="card stack">
       <div class="row spread"><h2>Прогрес</h2>
-        <span class="muted small">${Math.round(100 * known / total)}% вивчено</span></div>
+        <span class="muted small">${known ? `${Math.round(100 * known / total)}% вивчено`
+          : `розпочато ${known + learning} з ${total}`}</span></div>
       <div class="bar">
         <span class="b-known" style="width:${100 * known / total}%"></span>
         <span class="b-learn" style="width:${100 * learning / total}%"></span>
@@ -877,7 +856,7 @@ function renderHome() {
           </div>`).join("")}
       </details>
     </section>
-    ${saveFailed ? `<p class="small" style="color:var(--bad)">Браузер не дає зберегти прогрес (приватний режим?). Він зникне після закриття вкладки.</p>` : ""}
+    ${saveFailed ? `<p class="small text-bad">Браузер не дає зберегти прогрес (приватний режим?). Він зникне після закриття вкладки.</p>` : ""}
   </div>`);
 }
 
@@ -934,39 +913,7 @@ function comboHtml() {
 // ---- study ----
 function renderStudy() {
   const pick = view.current || nextCard();
-  if (!pick.id) {
-    const soon = pick.nextAt;
-    const unseen = DB.questions.length - Object.keys(S.cards).length;
-    const done = S.day.answers || 0, ok = S.day.correct || 0;
-    const streak = streakInfo();
-    const chance = readyNow();
-    if (!soon && done && !S.day.goalDone) {
-      S.day.goalDone = true; save(); ev("goal_done", null, done);
-      setTimeout(confetti, 150);
-    }
-    const at = S.plan.remindAt || `${String(new Date().getHours()).padStart(2, "0")}:00`;
-    h(`
-    <div class="top"><button class="ghost" data-go="home">← Назад</button><h1>Навчання</h1></div>
-    <div class="card empty-state stack">
-      <div class="emoji">${soon ? "⏳" : "🎉"}</div>
-      <h2>${soon ? "Перерва" : "Ціль на сьогодні виконано"}</h2>
-      <p class="muted">${soon
-        ? `Наступна картка на навчанні — о ${new Date(soon).toLocaleTimeString("uk-UA", { hour: "2-digit", minute: "2-digit" })}.`
-        : "Нові картки й повторення на сьогодні закінчилися."}</p>
-      ${done ? `<div class="stat-grid">
-        <div><b>${done}</b><span>${plural(done, "відповідь", "відповіді", "відповідей")}</span></div>
-        <div><b>${Math.round(100 * ok / done)}%</b><span>правильно</span></div>
-        <div><b>🔥 ${streak.n}</b><span>${plural(streak.n, "день", "дні", "днів")} поспіль</span></div>
-      </div>` : ""}
-      <div style="text-align:left">${readyHtml(chance)}</div>
-      ${soon ? `<button class="block" data-act="study-now">Показати зараз</button>` : ""}
-      <button class="primary block" data-go="exam">Пробний іспит</button>
-      ${unseen ? `<button class="block" data-act="bonus">Ще 20 нових питань</button>` : ""}
-      ${!soon && !S.plan.remindAt ? `<button class="block" data-act="remind" data-at="${at}">📅 Нагадувати щодня о ${at}</button>` : ""}
-      ${!soon ? `<button class="ghost block" data-act="share" data-where="done">Порадити другу</button>` : ""}
-    </div>`);
-    return;
-  }
+  if (!pick.id) return renderStudyDone(pick.nextAt);
   view.current = pick;
   const q = byId[pick.id];
   const { learn, review, fresh } = queueCounts();
@@ -976,10 +923,10 @@ function renderStudy() {
   const answered = st.chosen !== null;
   const correct = answered && st.chosen === q.a;
   const auto = answered && correct && st.auto;
-  let dock = "";
+  let actions = "";
   if (answered) {
     const iv = previewIntervals(q.id);
-    dock = correct
+    actions = correct
       ? `<div class="grades">
            <button data-rate="${Rating.Hard}">Важко<small>${iv[Rating.Hard]}</small></button>
            <button class="primary ${auto ? "auto" : ""}" data-rate="${Rating.Good}" style="--auto:${AUTO_MS}ms">Добре<small>${iv[Rating.Good]}</small></button>
@@ -987,30 +934,57 @@ function renderStudy() {
          </div>`
       : `<button class="primary block big" data-rate="${Rating.Again}">Далі · знову через ${iv[Rating.Again]}</button>`;
   } else if (view.undo) {
-    dock = `<button class="ghost" data-act="undo">↶ Скасувати попередню відповідь</button>`;
+    actions = `<button class="ghost undo" data-act="undo">↶ Скасувати попередню відповідь</button>`;
   }
+  // Anki's three counters, each with a caption: people who never used Anki read them too.
+  const counter = (cls, kind, n, label) =>
+    `<span class="${cls} ${pick.kind === kind ? "on" : ""}">${n}<small>${label}</small></span>`;
   h(`
-  <div class="top">
-    <button class="ghost" data-go="home">← Назад</button>
-    <div class="grow"></div>
-    <div class="counts" title="нові · навчання · повторення">
-      <span class="c-new ${pick.kind === "new" ? "on" : ""}">${fresh}</span>
-      <span class="c-learn ${pick.kind === "learn" ? "on" : ""}">${learn}</span>
-      <span class="c-review ${pick.kind === "review" ? "on" : ""}">${review}</span>
-    </div>
-  </div>
-  <div class="bar thin" title="Ціль на сьогодні: ${goal.done} з ${goal.done + goal.left}">${barSpan("goal", goal.pct, "b-known")}</div>
-  <article class="card qcard">
-    ${questionHtml(q)}
-    ${optionsHtml(q, { chosen: st.chosen, reveal: answered, perm: st.perm, anim: st.anim })}
-    ${answered ? `<p class="verdict ${correct ? "ok" : "bad"}">${correct
-      ? `Правильно.${comboHtml()}<span class="hint">${auto
-        ? "Далі за мить. Торкніться картки, щоб зупинитися, або оцініть самі."
-        : "Наскільки легко було?"}</span>`
-      : `Неправильно. Правильна відповідь — ${shownNo(st.perm, q.a)}.`}</p>` : ""}
-    ${answered && !correct ? twinsHtml(q) : ""}
-  </article>
-  ${dock ? `<div class="dock"><div class="dock-inner">${dock}</div></div>` : ""}`);
+  ${topBar({ right: `<div class="counts" aria-label="Нових ${fresh}, на навчанні ${learn}, повторень ${review}">
+      ${counter("c-new", "new", fresh, "нові")}${counter("c-learn", "learn", learn, "вчу")}${counter("c-review", "review", review, "повт.")}
+    </div>` })}
+  <div class="bar thin" role="progressbar" aria-label="Ціль на сьогодні" aria-valuenow="${goal.pct}" aria-valuemin="0" aria-valuemax="100"
+    title="Ціль на сьогодні: ${goal.done} з ${goal.done + goal.left}">${barSpan("goal", goal.pct, "b-known")}</div>
+  ${quizCard(q, { chosen: st.chosen, perm: st.perm, anim: st.anim,
+    right: `${comboHtml()}<span class="hint">${auto
+      ? "Далі за мить. Торкніться картки, щоб зупинитися, або оцініть самі."
+      : "Наскільки легко було?"}</span>`,
+    extra: twinsHtml(q) })}
+  ${dock(actions)}`);
+}
+
+// Nothing due right now: a break until the next learning step, or the day is done.
+function renderStudyDone(soon) {
+  const unseen = DB.questions.length - Object.keys(S.cards).length;
+  const done = S.day.answers || 0, ok = S.day.correct || 0;
+  const streak = streakInfo();
+  const chance = readyNow();
+  if (!soon && done && !S.day.goalDone) {
+    S.day.goalDone = true; save(); ev("goal_done", null, done);
+    setTimeout(confetti, 150);
+  }
+  const at = S.plan.remindAt || `${String(new Date().getHours()).padStart(2, "0")}:00`;
+  h(`
+  ${topBar({ title: "Навчання" })}
+  ${emptyState({
+    emoji: soon ? "⏳" : "🎉",
+    title: soon ? "Перерва" : "Ціль на сьогодні виконано",
+    text: soon
+      ? `Наступна картка на навчанні — о ${new Date(soon).toLocaleTimeString("uk-UA", { hour: "2-digit", minute: "2-digit" })}.`
+      : "Нові картки й повторення на сьогодні закінчилися.",
+    body: `${done ? `<div class="stat-grid">
+        <div><b>${done}</b><span>${plural(done, "відповідь", "відповіді", "відповідей")}</span></div>
+        <div><b>${Math.round(100 * ok / done)}%</b><span>правильно</span></div>
+        <div><b>🔥 ${streak.n}</b><span>${plural(streak.n, "день", "дні", "днів")} поспіль</span></div>
+      </div>` : ""}
+      ${chanceShown(chance) ? readyHtml(chance) : ""}`,
+    actions: `
+      ${soon ? `<button class="primary block" data-act="study-now">Показати зараз</button>` : ""}
+      <button class="${soon ? "" : "primary"} block" data-go="exam">Пробний іспит</button>
+      ${unseen ? `<button class="block" data-act="bonus">Ще 20 нових питань</button>` : ""}
+      ${!soon && !S.plan.remindAt ? `<button class="block" data-act="remind" data-at="${at}">📅 Нагадувати щодня о ${at}</button>` : ""}
+      ${!soon ? `<button class="ghost block" data-act="share" data-where="done">Порадити другу</button>` : ""}`,
+  })}`);
 }
 
 // ---- exam ----
@@ -1041,25 +1015,18 @@ function renderExam() {
     const cls = a === null ? "" : a === byId[id].a ? "ok" : "bad";
     return `<button class="dot ${cls} ${i === ex.i ? "cur" : ""}" data-jump="${i}" aria-label="Питання ${i + 1}">${i + 1}</button>`;
   }).join("");
-  let dock;
-  if (!left) dock = `<button class="primary block big" data-act="exam-finish">Завершити іспит</button>`;
-  else if (answered) dock = `<button class="primary block big" data-act="exam-next">Далі</button>`;
-  else dock = `<button class="block" data-act="exam-next" ${left > 1 ? "" : "disabled"}>Пропустити</button>`;
+  let action;
+  if (!left) action = `<button class="primary block big" data-act="exam-finish">Завершити іспит</button>`;
+  else if (answered) action = `<button class="primary block big" data-act="exam-next">Далі</button>`;
+  else action = `<button class="block" data-act="exam-next" ${left > 1 ? "" : "disabled"}>Пропустити</button>`;
+  const errCls = errors > EXAM_MAX_ERRORS ? "t-bad" : errors ? "t-warn" : "";
   h(`
-  <div class="top">
-    <button class="ghost" data-act="exam-quit">✕ Вийти</button>
-    <h1 class="small muted" style="text-align:center">Питання ${ex.i + 1} з ${ex.ids.length}
-      · <span style="color:${errors > EXAM_MAX_ERRORS ? "var(--bad)" : "inherit"}">помилок ${errors}</span></h1>
-    <span class="timer" id="timer"></span>
-  </div>
+  ${topBar({ back: 'data-act="exam-quit"', close: true, title: `Питання ${ex.i + 1} з ${ex.ids.length}`,
+    sub: `<span class="${errCls}">${errors} ${plural(errors, "помилка", "помилки", "помилок")}</span> з ${EXAM_MAX_ERRORS} допустимих`,
+    right: `<span class="timer" id="timer" role="timer" aria-label="Залишилось часу"></span>` })}
   <div class="dots">${dots}</div>
-  <article class="card qcard">
-    ${questionHtml(q)}
-    ${optionsHtml(q, { chosen, reveal: answered, perm: ex.perms?.[ex.i], anim: ex.anim === ex.i })}
-    ${answered ? `<p class="verdict ${chosen === q.a ? "ok" : "bad"}">${chosen === q.a
-      ? "Правильно" : `Неправильно. Правильна відповідь — ${shownNo(ex.perms?.[ex.i], q.a)}.`}</p>` : ""}
-  </article>
-  <div class="dock"><div class="dock-inner">${dock}</div></div>`);
+  ${quizCard(q, { chosen, perm: ex.perms?.[ex.i], anim: ex.anim === ex.i })}
+  ${dock(action)}`);
   if (answered) app.querySelector(".opt.right")?.scrollIntoView({ block: "center" });
   tick();
   timerHandle = setInterval(tick, 1000);
@@ -1095,6 +1062,7 @@ function tick() {
 
 function finishExam(timeout = false) {
   const ex = view.exam;
+  document.querySelectorAll("dialog.sheet[open]").forEach((d) => d.close(""));   // e.g. "Вийти з іспиту?"
   const errors = ex.ids.reduce((n, id, i) => n + (ex.answers[i] !== byId[id].a ? 1 : 0), 0);
   ex.ids.forEach((id, i) => { if (ex.answers[i] !== byId[id].a) S.wrong[id] = Date.now(); });
   const rec = { at: Date.now(), errors, total: ex.ids.length, passed: errors <= EXAM_MAX_ERRORS, timeout };
@@ -1118,21 +1086,21 @@ function renderResult() {
   const wrong = ex.ids.map((id, i) => ({ q: byId[id], chosen: ex.answers[i] }))
     .filter((x) => x.chosen !== x.q.a);
   h(`
-  <div class="top"><button class="ghost" data-go="home">← На головну</button></div>
-  <section class="card stack" style="text-align:center">
-    <div class="emoji" style="font-size:40px">${rec.passed ? "✅" : "❌"}</div>
+  ${topBar({ title: "Результат іспиту" })}
+  <section class="card stack result">
+    <div class="emoji" aria-hidden="true">${rec.passed ? "✅" : "❌"}</div>
     <div class="result-big">${rec.total - rec.errors}/${rec.total}</div>
-    <h2>${rec.passed ? "Склав" : "Не склав"}</h2>
+    <h2 tabindex="-1">${rec.passed ? "Іспит складено" : "Іспит не складено"}</h2>
     <p class="muted">${rec.errors} ${plural(rec.errors, "помилка", "помилки", "помилок")}${rec.timeout ? " · час вичерпано" : ""}.
       Допускається не більше ${EXAM_MAX_ERRORS}.</p>
-    <div class="row" style="justify-content:center">
+    <div class="actions two">
       <button class="primary" data-go="exam">Ще один іспит</button>
       <button data-go="home">На головну</button>
     </div>
     ${rec.passed ? `<button class="ghost block" data-act="share" data-where="exam"
       data-text="Склав(ла) пробний іспит ПДР на ${rec.total - rec.errors}/${rec.total} 🚗 Готуюся безкоштовно тут:">Поділитися результатом</button>` : ""}
   </section>
-  ${wrong.length ? `<h2 style="margin:20px 0 12px">Помилки</h2>
+  ${wrong.length ? `<h2 class="section-h">Розбір помилок <span class="muted">${wrong.length}</span></h2>
   <div class="stack">${wrong.map(({ q, chosen }) => `
     <article class="card">${questionHtml(q)}${optionsHtml(q, { chosen, reveal: true, perm: ex.perms?.[ex.ids.indexOf(q.id)] })}
       ${chosen === null ? `<p class="verdict bad">Без відповіді</p>` : ""}</article>`).join("")}
@@ -1148,54 +1116,55 @@ function renderDrill() {
   const id = view.queue[0];
   if (!id) {
     h(`
-    <div class="top"><button class="ghost" data-go="home">← Назад</button><h1>Помилки</h1></div>
-    <div class="card empty-state stack"><div class="emoji">🎉</div><h2>Помилок не лишилося</h2>
-      <button class="primary block" data-go="home">На головну</button></div>`);
+    ${topBar({ title: "Помилки" })}
+    ${emptyState({ emoji: "🎉", title: "Помилок не лишилося",
+      text: "Кожне питання з помилкою ви тепер відповіли правильно.",
+      actions: `<button class="primary block" data-go="home">На головну</button>` })}`);
     return;
   }
   const q = byId[id];
   const st = view.state || { chosen: null, shownAt: activeNow(), perm: makePerm(q) };
   view.state = st;
   const answered = st.chosen !== null;
-  const correct = answered && st.chosen === q.a;
-  const auto = correct && st.auto;
+  const auto = answered && st.chosen === q.a && st.auto;
   h(`
-  <div class="top"><button class="ghost" data-go="home">← Назад</button>
-    <h1 class="small muted" style="text-align:center">Помилки · лишилось ${view.queue.length}</h1></div>
-  <article class="card qcard">
-    ${questionHtml(q)}
-    ${optionsHtml(q, { chosen: st.chosen, reveal: answered, perm: st.perm, anim: st.anim })}
-    ${answered ? `<p class="verdict ${correct ? "ok" : "bad"}">${correct
-      ? `Правильно — питання прибрано зі списку.${comboHtml()}`
-      : `Неправильно. Правильна відповідь — ${shownNo(st.perm, q.a)}. Питання повториться.`}</p>` : ""}
-    ${answered && !correct ? twinsHtml(q) : ""}
-  </article>
-  ${answered ? `<div class="dock"><div class="dock-inner">
-    <button class="primary block big ${auto ? "auto" : ""}" style="--auto:${AUTO_MS}ms" data-act="drill-next">Далі</button></div></div>` : ""}`);
+  ${topBar({ title: "Робота над помилками", sub: `лишилось ${view.queue.length}` })}
+  ${quizCard(q, { chosen: st.chosen, perm: st.perm, anim: st.anim,
+    right: ` Питання прибрано зі списку.${comboHtml()}`, wrong: " Питання повториться.", extra: twinsHtml(q) })}
+  ${dock(answered ? `<button class="primary block big ${auto ? "auto" : ""}" style="--auto:${AUTO_MS}ms" data-act="drill-next">Далі</button>` : "")}`);
 }
 
 // ---- settings ----
+const PACE_NOTE = {
+  two: "~2–2,5 год на день. За 10 днів пройдете всю базу, далі — повторення.",
+  one: "~4–5 год на день: 5 днів нових питань і 2 дні повторення. Інтервали не довші за 3 дні.",
+  custom: "Свій темп: параметри змінено вручну.",
+};
+// Every field saves on change; there is no "Save" button to forget.
 function renderSettings() {
   const s = S.settings;
+  const custom = !PRESETS[s.preset];
   h(`
-  <div class="top"><button class="ghost" data-go="home">← Назад</button><h1>Налаштування</h1></div>
+  ${topBar({ title: "Налаштування" })}
   <div class="stack">
     <section class="card stack">
       <h2>Скільки часу до іспиту</h2>
-      <div class="seg">${Object.entries(PRESETS).map(([k, p]) =>
-        `<button data-preset="${k}" class="${s.preset === k ? "on" : ""}">${p.label}</button>`).join("")}</div>
-      <p class="note">2 тижні: 175 нових на день, ~2–2,5 год. 1 тиждень: 350 нових на день 5 днів і 2 дні повторення, ~4–5 год,
-        максимальний інтервал 3 дні, кроки навчання 10 хв і 1 год.</p>
-      <label class="field"><span>Нових карток на день</span>
-        <input type="number" id="newPerDay" min="0" max="2000" value="${s.newPerDay}"></label>
-      <label class="field"><span>Бажана утримуваність (FSRS)</span>
-        <select id="retention">${[0.85, 0.9, 0.92, 0.95].map((r) =>
-          `<option value="${r}" ${s.retention === r ? "selected" : ""}>${Math.round(r * 100)} %</option>`).join("")}</select></label>
-      <label class="field"><span>Максимальний інтервал, днів</span>
-        <input type="number" id="maxIvl" min="1" max="36500" value="${s.maxIvl}"></label>
-      <p class="note">Алгоритм — FSRS-6 (як в Anki) зі стандартними параметрами. Кроки навчання: ${esc(s.steps.join(" "))},
-        повторне навчання: 10m.</p>
-      <button class="primary block" data-act="save-settings">Зберегти</button>
+      <div class="seg" role="radiogroup" aria-label="Темп підготовки">${Object.entries(PRESETS).map(([k, p]) =>
+        `<button role="radio" aria-checked="${s.preset === k}" data-preset="${k}" class="${s.preset === k ? "on" : ""}">
+          ${p.label}<small>${p.newPerDay} нових на день</small></button>`).join("")}</div>
+      <p class="note" id="paceNote">${PACE_NOTE[s.preset] || PACE_NOTE.custom}</p>
+      <details class="more" ${custom ? "open" : ""}>
+        <summary>Додатково: параметри FSRS</summary>
+        <label class="field"><span>Нових карток на день</span>
+          <input type="number" inputmode="numeric" id="newPerDay" min="0" max="2000" value="${s.newPerDay}"></label>
+        <label class="field"><span>Бажана утримуваність</span>
+          <select id="retention">${[0.85, 0.9, 0.92, 0.95].map((r) =>
+            `<option value="${r}" ${s.retention === r ? "selected" : ""}>${Math.round(r * 100)} %</option>`).join("")}</select></label>
+        <label class="field"><span>Максимальний інтервал, днів</span>
+          <input type="number" inputmode="numeric" id="maxIvl" min="1" max="36500" value="${s.maxIvl}"></label>
+        <p class="note">FSRS-6, як в Anki, зі стандартними параметрами. Кроки навчання: ${esc(s.steps.join(" "))},
+          повторне навчання: 10m. Зміни зберігаються одразу.</p>
+      </details>
     </section>
 
     <section class="card stack">
@@ -1204,8 +1173,8 @@ function renderSettings() {
          ["auto", "Автоперехід після правильної відповіді", `Через ${AUTO_MS / 1000} с ставиться «Добре». Торкніться картки, щоб зупинити, або оцініть самі.`],
          ["motion", "Анімації", "Переходи між питаннями, конфеті за досягнення."]].map(([k, title, note]) => `
         <div class="pref">
-          <div><b>${title}</b><p class="note">${note}</p></div>
-          <button class="switch ${S.prefs[k] ? "on" : ""}" data-pref="${k}" role="switch" aria-checked="${S.prefs[k]}" aria-label="${title}"><span></span></button>
+          <div id="pref-${k}"><b>${title}</b><p class="note">${note}</p></div>
+          <button class="switch ${S.prefs[k] ? "on" : ""}" data-pref="${k}" role="switch" aria-checked="${S.prefs[k]}" aria-labelledby="pref-${k}"><span></span></button>
         </div>`).join("")}
     </section>
 
@@ -1215,11 +1184,8 @@ function renderSettings() {
         <input type="date" id="examDate" value="${S.plan.examDate || ""}"></label>
       <label class="field"><span>Нагадування щодня о</span>
         <input type="time" id="remindAt" value="${S.plan.remindAt || "19:00"}"></label>
-      <p class="note">Нагадування додається у ваш календар (файл .ics) — щодня до дати іспиту, або 14 днів, якщо дату не вказано.</p>
-      <div class="row">
-        <button class="grow" data-act="save-plan">Зберегти дату</button>
-        <button class="grow" data-act="remind">📅 Додати в календар</button>
-      </div>
+      <button class="block" data-act="remind">📅 Додати нагадування в календар</button>
+      <p class="note">Файл .ics для вашого календаря: щодня до дати іспиту, або 14 днів, якщо дату не вказано.</p>
     </section>
 
     <section class="card stack">
@@ -1232,13 +1198,35 @@ function renderSettings() {
     <section class="card stack">
       <h2>Прогрес</h2>
       <p class="note">Прогрес зберігається лише в цьому браузері. Зробіть резервну копію, щоб перенести його на інший пристрій.</p>
-      <div class="row">
-        <button class="grow" data-act="export">Експорт</button>
-        <label class="btn grow" style="cursor:pointer">Імпорт<input type="file" id="importFile" accept="application/json" hidden></label>
+      <div class="actions two">
+        <button data-act="export">Експорт</button>
+        <label class="btn">Імпорт<input type="file" id="importFile" accept="application/json" hidden></label>
       </div>
-      <button class="block" data-act="reset" style="color:var(--bad)">Скинути весь прогрес</button>
+      <button class="block text-bad" data-act="reset">Скинути весь прогрес</button>
     </section>
+    <footer><p><a href="privacy.html">Конфіденційність</a> · <a href="https://github.com/punjet/PDRAnkiDeck">GitHub</a></p></footer>
   </div>`);
+}
+
+// Pace fields under "Додатково": any edit turns the preset into "custom".
+function saveSettingField(el) {
+  const num = (lo, hi, d) => {
+    const v = Number(el.value);
+    return Number.isFinite(v) && el.value !== "" ? Math.min(hi, Math.max(lo, Math.round(v))) : d;
+  };
+  const s = { ...S.settings };
+  if (el.id === "newPerDay") s.newPerDay = num(0, 2000, s.newPerDay);
+  if (el.id === "retention") s.retention = Number(el.value);
+  if (el.id === "maxIvl") s.maxIvl = num(1, 36500, s.maxIvl);
+  if (el.type === "number") el.value = s[el.id];   // show the clamped value
+  if (s.newPerDay === S.settings.newPerDay && s.retention === S.settings.retention && s.maxIvl === S.settings.maxIvl) return;
+  S.settings = { ...s, preset: "custom" };
+  save(); makeScheduler();
+  // Only the parts that show the preset change; a full redraw would steal focus and the next tap.
+  app.querySelectorAll("[data-preset]").forEach((b) => { b.classList.remove("on"); b.setAttribute("aria-checked", "false"); });
+  const note = document.getElementById("paceNote");
+  if (note) note.textContent = PACE_NOTE.custom;
+  toast("Збережено");
 }
 
 // ---------- search and topics ----------
@@ -1307,7 +1295,6 @@ function topicOrder(t) {
 // Where "← Назад" returns to; the search view keeps its query.
 const backOf = (v) => (v.name === "search" ? { name: "search" } : v.name === "topic" ? { name: "topic", id: v.id, back: v.back } : { name: v.name });
 
-const clipText = (t, n) => (t.length > n ? `${t.slice(0, n - 1)}…` : t);
 const secShort = (q) => q.sec.match(/^Розділ\s+(\d+(?:\.\d+)*)/)?.[1] || "";
 
 function questionRow(q, practiceKey) {
@@ -1330,8 +1317,8 @@ function topicRow(t) {
 
 function renderSearch() {
   h(`
-  <div class="top"><button class="ghost" data-go="home">← Назад</button><h1>Пошук</h1></div>
-  <div class="search-box">
+  ${topBar({ title: "Пошук" })}
+  <div class="search-box" role="search">
     <input id="q" type="search" inputmode="search" autocomplete="off" enterkeyhint="search"
       placeholder="обгін, трамвай, знак «Стоп», аварійка…" value="${esc(searchQuery)}" aria-label="Пошук питань і тем">
   </div>
@@ -1360,7 +1347,7 @@ function renderSearchResults() {
     ${qs.length ? `<h2 class="res-h">Питання <span class="muted">${qs.length}</span></h2>
       <ol class="seclist">${shown.map((x) => questionRow(x, x.id)).join("")}</ol>
       ${qs.length > shown.length ? `<p class="muted small search-hint">Показано ${shown.length} з ${qs.length}. Уточніть запит.</p>` : ""}`
-    : topics.length ? "" : `<div class="empty-state"><p class="muted">Нічого не знайдено. Спробуйте інше слово або коротшу форму: «обго», «розвор».</p></div>`}`;
+    : topics.length ? "" : `<div class="empty-state"><p class="emoji" aria-hidden="true">🔍</p><p class="muted">Нічого не знайдено. Спробуйте інше слово або коротшу форму: «обго», «розвор».</p></div>`}`;
   // Only how many results came back is logged, never the text typed.
   clearTimeout(searchLogTimer);
   searchLogTimer = setTimeout(() => ev("search", qs.length || topics.length ? "found" : "none", qs.length), 1500);
@@ -1387,11 +1374,11 @@ function renderTopic() {
   const p = topicProgress(t);
   const ids = topicOrder(t);
   h(`
-  <div class="top"><button class="ghost" data-act="back">← Назад</button><h1 class="small muted">${esc(t.group)}</h1></div>
+  ${topBar({ back: 'data-act="back"', title: esc(t.group) })}
   <section class="card stack">
-    <h2 class="topic-h">${esc(t.name)}</h2>
+    <h2 class="topic-h" tabindex="-1">${esc(t.name)}</h2>
     <p class="muted">${esc(t.desc)}</p>
-    <div class="bar"><span class="b-known" style="width:${p.pct}%"></span></div>
+    <div class="bar">${barSpan(`topic-${t.id}`, p.pct, "b-known")}</div>
     <p class="small muted">Вивчено ${p.known} з ${p.total}</p>
     <button class="primary block big" data-practice="all">Тренувати тему · ${p.total} ${plural(p.total, "питання", "питання", "питань")}</button>
     <p class="note">Спершу ваші помилки, потім нові. Розклад повторень не змінюється, а помилки потраплять у «Помилки».</p>
@@ -1404,14 +1391,11 @@ function renderPractice() {
   if (!id || view.done) {
     const n = Object.keys(view.results).length, ok = Object.values(view.results).filter(Boolean).length;
     h(`
-    <div class="top"><button class="ghost" data-act="back">← Назад</button><h1 class="small muted">${esc(view.title)}</h1></div>
-    <div class="card empty-state stack">
-      <div class="emoji">${n && ok === n ? "🎉" : "✅"}</div>
-      <h2>${n ? `${ok} з ${n} правильно` : "Готово"}</h2>
-      ${n && ok < n ? `<p class="muted">Помилки додано в «Робота над помилками».</p>` : ""}
-      <button class="primary block" data-act="practice-again">Ще раз</button>
-      <button class="block" data-act="back">Назад</button>
-    </div>`);
+    ${topBar({ back: 'data-act="back"', title: esc(view.title) })}
+    ${emptyState({ emoji: n && ok === n ? "🎉" : "✅", title: n ? `${ok} з ${n} правильно` : "Готово",
+      text: n && ok < n ? "Помилки додано в «Помилки» на головній." : "",
+      actions: `<button class="primary block" data-act="practice-again">Ще раз</button>
+        <button class="block" data-act="back">Назад</button>` })}`);
     if (n >= 5 && ok === n) setTimeout(confetti, 150);
     return;
   }
@@ -1419,23 +1403,13 @@ function renderPractice() {
   const st = view.state || { chosen: null, shownAt: activeNow(), perm: makePerm(q) };
   view.state = st;
   const answered = st.chosen !== null;
-  const correct = answered && st.chosen === q.a;
-  const auto = correct && st.auto;
+  const auto = answered && st.chosen === q.a && st.auto;
   h(`
-  <div class="top"><button class="ghost" data-act="back">← Назад</button>
-    <h1 class="small muted" style="text-align:center">${esc(clipText(view.title, 40))} · ${view.i + 1} з ${view.ids.length}</h1></div>
-  <div class="bar thin"><span class="b-known" style="width:${100 * view.i / view.ids.length}%"></span></div>
-  <article class="card qcard">
-    ${questionHtml(q)}
-    ${optionsHtml(q, { chosen: st.chosen, reveal: answered, perm: st.perm, anim: st.anim })}
-    ${answered ? `<p class="verdict ${correct ? "ok" : "bad"}">${correct
-      ? `Правильно.${comboHtml()}`
-      : `Неправильно. Правильна відповідь — ${shownNo(st.perm, q.a)}.`}</p>` : ""}
-    ${answered && !correct ? twinsHtml(q) : ""}
-  </article>
-  ${answered ? `<div class="dock"><div class="dock-inner">
-    <button class="primary block big ${auto ? "auto" : ""}" style="--auto:${AUTO_MS}ms" data-act="practice-next">${
-      view.i + 1 < view.ids.length ? "Далі" : "Завершити"}</button></div></div>` : ""}`);
+  ${topBar({ back: 'data-act="back"', title: esc(view.title), sub: `${view.i + 1} з ${view.ids.length}` })}
+  <div class="bar thin">${barSpan("practice", Math.round(100 * view.i / view.ids.length), "b-known")}</div>
+  ${quizCard(q, { chosen: st.chosen, perm: st.perm, anim: st.anim, right: comboHtml(), extra: twinsHtml(q) })}
+  ${dock(answered ? `<button class="primary block big ${auto ? "auto" : ""}" style="--auto:${AUTO_MS}ms" data-act="practice-next">${
+      view.i + 1 < view.ids.length ? "Далі" : "Завершити"}</button>` : "")}`);
 }
 
 function practiceNext() {
@@ -1452,7 +1426,8 @@ app.addEventListener("click", async (e) => {
   if (t.tagName === "A") e.preventDefault();
   if (t.dataset.go) {
     const v = { name: t.dataset.go };
-    if (v.name === "exam" && view.name === "exam" && view.exam && !confirm("Почати новий іспит?")) return;
+    if (v.name === "exam" && view.name === "exam" && view.exam
+      && !(await ask("Почати новий іспит? Поточний не буде зараховано.", { ok: "Почати новий" }))) return;
     return go(v);
   }
   if (t.dataset.opt !== undefined) return pickOption(Number(t.dataset.opt));
@@ -1493,8 +1468,9 @@ app.addEventListener("click", async (e) => {
   }
   if (act === "exam-finish") return finishExam();
   if (act === "exam-quit") {
-    if (!confirm("Вийти з іспиту? Результат не буде зараховано.")) return;
     const ex = view.exam;
+    if (!(await ask("Вийти з іспиту? Результат не буде зараховано.", { ok: "Вийти", cancel: "Продовжити іспит", danger: true }))) return;
+    if (view.name !== "exam" || view.exam !== ex) return;   // time ran out while the dialog was open
     const answered = ex.answers.filter((a) => a !== null).length;
     tele.track("exams", {
       uid: S.tele.uid, sid: SID,
@@ -1509,26 +1485,11 @@ app.addEventListener("click", async (e) => {
     return go({ name: "home" });
   }
   if (act === "drill-next") return drillNext();
-  if (act === "save-settings") {
-    const n = (sel, lo, hi, d) => {
-      const v = Number(document.getElementById(sel).value);
-      return Number.isFinite(v) ? Math.min(hi, Math.max(lo, Math.round(v))) : d;
-    };
-    S.settings = {
-      ...S.settings,
-      preset: "custom",
-      newPerDay: n("newPerDay", 0, 2000, S.settings.newPerDay),
-      retention: Number(document.getElementById("retention").value),
-      maxIvl: n("maxIvl", 1, 36500, S.settings.maxIvl),
-    };
-    save(); makeScheduler();
-    return go({ name: "home" });
-  }
   if (act === "export") return exportProgress();
   if (act === "reset") {
-    if (confirm("Видалити весь прогрес, історію іспитів і помилки? Це не можна скасувати.")) {
+    if (await ask("Видалити весь прогрес, історію іспитів і помилки? Це не можна скасувати.", { ok: "Видалити все", danger: true })) {
       const keep = { tele: S.tele, plan: S.plan };
-      S = { ...defaultState(), ...keep, firstSeen: Date.now() }; save(); makeScheduler(); go({ name: "home" });
+      S = { ...defaultState(), ...keep, firstSeen: Date.now() }; save(); makeScheduler(); applyMotion(); go({ name: "home" });
     }
     return;
   }
@@ -1547,6 +1508,7 @@ app.addEventListener("click", async (e) => {
   if (t.dataset.pref) {
     const k = t.dataset.pref;
     S.prefs[k] = !S.prefs[k]; save();
+    applyMotion();
     return render();
   }
   if (act === "bonus") {
@@ -1558,10 +1520,6 @@ app.addEventListener("click", async (e) => {
     const at = document.getElementById("remindAt")?.value || t.dataset.at || "19:00";
     downloadReminder(at);
     return render();
-  }
-  if (act === "save-plan") {
-    setExamDate(document.getElementById("examDate").value);
-    return go({ name: "home" });
   }
   if (act === "share") {
     return shareApp(t.dataset.where, t.dataset.text || "Безкоштовний тренажер ПДР: усі питання ГСЦ і пробний іспит, як у сервісному центрі 🚗");
@@ -1610,6 +1568,9 @@ app.addEventListener("input", (e) => {
 app.addEventListener("change", (e) => {
   if (e.target.id === "importFile" && e.target.files[0]) importProgress(e.target.files[0]);
   if (e.target.id === "examDateHome" && e.target.value) { setExamDate(e.target.value); render(); }
+  // While a year is typed digit by digit (0002, 0020…) the field already reports a date.
+  if (e.target.id === "examDate" && (!e.target.value || e.target.value >= "2020")) { setExamDate(e.target.value); toast(e.target.value ? "Дату іспиту збережено" : "Дату іспиту прибрано"); }
+  if (["newPerDay", "retention", "maxIvl"].includes(e.target.id)) saveSettingField(e.target);
 });
 
 function drillNext() {
@@ -1631,6 +1592,7 @@ function pickOption(i) {
       { shuffled: isShuffled(ex.perms[ex.i]) });
     try { navigator.vibrate?.(i === byId[ex.ids[ex.i]].a ? 12 : [40, 60, 40]); } catch (e) { /* not allowed */ }
     ex.anim = ex.i;
+    announceVerdict(byId[ex.ids[ex.i]], i, ex.perms[ex.i]);
     renderExamKeepTimer();
     ex.anim = null;
     if (first) streakToast();
@@ -1655,6 +1617,7 @@ function pickOption(i) {
       save();
     }
     const st = view.state;
+    announceVerdict(q, i, st.perm);
     st.auto = right && S.prefs.auto;
     st.anim = true;
     render();
@@ -1692,6 +1655,7 @@ function doRate(r, auto = false) {
 
 document.addEventListener("keydown", (e) => {
   if (e.target.matches("input, select, textarea") || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (document.querySelector("dialog[open]")) return;   // keys belong to the open dialog
   const n = Number(e.key);
   if (n >= 1 && n <= 9) {
     const btn = app.querySelectorAll(".opts .opt")[n - 1];
@@ -1718,20 +1682,20 @@ async function importProgress(file) {
   try {
     const data = JSON.parse(await file.text());
     if (data.app !== STORE_KEY || !data.state || typeof data.state.cards !== "object") throw new Error("format");
-    if (!confirm("Замінити поточний прогрес даними з файлу?")) return;
+    if (!(await ask("Замінити поточний прогрес даними з файлу?", { ok: "Замінити", danger: true }))) return;
     S = { ...defaultState(), ...data.state };
     S.tele = { ...defaultState().tele, ...S.tele };
     for (const k of ["plan", "ui", "best", "prefs"]) S[k] = { ...defaultState()[k], ...S[k] };
     S.day = { ...newDay(S.day.key), ...S.day };
     seedDays();
-    save(); makeScheduler(); go({ name: "home" });
+    save(); makeScheduler(); applyMotion(); go({ name: "home" });
   } catch (err) {
-    alert("Це не файл прогресу цього застосунку.");
+    toast("Це не файл прогресу цього застосунку");
   }
 }
 
 async function saveOffline(btn) {
-  if (!("caches" in window)) { alert("Цей браузер не підтримує офлайн-збереження."); return; }
+  if (!("caches" in window)) { toast("Цей браузер не підтримує офлайн-збереження"); return; }
   const names = [...new Set(DB.questions.flatMap((q) => q.img))];
   const cache = await caches.open(IMG_CACHE);
   btn.disabled = true;
@@ -1773,6 +1737,7 @@ async function boot() {
   if (S.tele.on === null) S.tele.on = true;
   save();
   makeScheduler();
+  applyMotion();
   tele.init(() => S.tele.on);
   try {
     const r = await fetch("questions.json");

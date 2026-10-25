@@ -50,7 +50,8 @@ WHOLE_SECTION = 6000  # a PDR section this small goes into the prompt whole (16 
 # $ per 1M tokens (input, cached input, output), standard rates; the Batch API bills half.
 PRICES = {"gpt-5-nano": (0.05, 0.005, 0.40), "gpt-5-mini": (0.25, 0.025, 2.00),
           "gpt-5.4-nano": (0.20, 0.02, 1.25), "gpt-5.4-mini": (0.75, 0.075, 4.50),
-          "gpt-5": (1.25, 0.125, 10.00), "gpt-5.1": (1.25, 0.125, 10.00)}
+          "gpt-5": (1.25, 0.125, 10.00), "gpt-5.1": (1.25, 0.125, 10.00),
+          "gpt-5.2": (1.75, 0.175, 14.00)}
 
 RULES = json.load(open(os.path.join(DATA, "pdr_rules.json"), encoding="utf-8"))["items"]
 QDATA = json.load(open(os.path.join(DATA, "questions.json"), encoding="utf-8"))
@@ -374,7 +375,7 @@ def cmd_submit(a):
         qs = [q for q in qs if q["section"] in set(a.sections.split(","))]
     if a.skip_sections:
         qs = [q for q in qs if q["section"] not in set(a.skip_sections.split(","))]
-    elif not a.redo:
+    if not a.redo and not a.ids:
         qs = [q for q in qs if q["legacyId"] not in done]
     if a.limit:
         qs = qs[:a.limit]  # deck order: questions most likely to be in the ticket come first
@@ -386,30 +387,38 @@ def cmd_submit(a):
     # (e.g. "знак 2.1" taken for clause 2.1 about the driver's documents).
     seen = {qid: sorted({k for k in re.findall(r"^(\d+(?:\.\d+)+)\. ", c, re.M) if k in RULES})
             for qid, c in ctx.items()}
-    os.makedirs(WORK, exist_ok=True)
+    # Dry runs go to their own folder, never next to the files of real batches.
+    folder = os.path.join(WORK, "dry-run") if a.dry_run else WORK
+    os.makedirs(folder, exist_ok=True)
+    c = None if a.dry_run else client()
     n0 = len(load(STATE, {"batches": []})["batches"])
-    # OpenAI wants one model per batch, so each pass is its own batch.
-    files = {}
-    for kind, model in (("blind", a.check_model), ("explain", a.model)):
-        path = os.path.join(WORK, f"explain_requests_{n0}_{kind}.jsonl")
-        with open(path, "w", encoding="utf-8") as f:
-            f.writelines(json.dumps(line(q, ctx[q["legacyId"]], kind, model), ensure_ascii=False) + "\n"
-                         for q in qs)
-        files[kind] = (path, model)
-        print(f"{kind}: {len(qs)} requests to {model}, {os.path.getsize(path) / 1e6:.1f} MB -> {path}")
-    if a.dry_run:
-        return
-    c = client()
-    jobs = {}
-    for kind, (path, model) in files.items():
-        up = c.files.create(file=open(path, "rb"), purpose="batch")
-        b = c.batches.create(input_file_id=up.id, endpoint="/v1/chat/completions", completion_window="24h")
-        jobs[kind] = {"id": b.id, "model": model}
-        print(f"submitted {kind}: {b.id}")
-    st = load(STATE, {"batches": []})
-    st["batches"].append({"jobs": jobs, "out": os.path.relpath(out_path, ROOT), "n": len(qs),
-                          "seen": seen, "collected": False})
-    save(STATE, st)
+    # Several smaller batches instead of one big one: OpenAI runs them side by side, each stays
+    # under the per-model limit of tokens waiting in the batch queue, and the first results
+    # arrive (and can be collected) while the rest are still running.
+    parts = [qs[i:i + a.chunk] for i in range(0, len(qs), a.chunk)]
+    for n, part in enumerate(parts):
+        files = {}
+        # OpenAI wants one model per batch, so each pass is its own batch.
+        for kind, model in (("blind", a.check_model), ("explain", a.model)):
+            path = os.path.join(folder, f"explain_requests_{n0 + n}_{kind}.jsonl")
+            with open(path, "w", encoding="utf-8") as f:
+                f.writelines(json.dumps(line(q, ctx[q["legacyId"]], kind, model), ensure_ascii=False) + "\n"
+                             for q in part)
+            files[kind] = (path, model)
+            print(f"part {n + 1}/{len(parts)} {kind}: {len(part)} requests to {model}, "
+                  f"{os.path.getsize(path) / 1e6:.1f} MB")
+        if a.dry_run:
+            continue
+        jobs = {}
+        for kind, (path, model) in files.items():
+            up = c.files.create(file=open(path, "rb"), purpose="batch")
+            b = c.batches.create(input_file_id=up.id, endpoint="/v1/chat/completions", completion_window="24h")
+            jobs[kind] = {"id": b.id, "model": model}
+        st = load(STATE, {"batches": []})
+        st["batches"].append({"jobs": jobs, "out": os.path.relpath(out_path, ROOT), "n": len(part),
+                              "seen": {q["legacyId"]: seen[q["legacyId"]] for q in part}, "collected": False})
+        save(STATE, st)  # after each part: an interrupted submit keeps what was already sent
+        print(f"  submitted: {jobs['blind']['id']}, {jobs['explain']['id']}")
 
 
 def pending(st):
@@ -453,70 +462,233 @@ def cost(usage, model):
     return (fresh * p[0] + cached * p[1] + usage["completion_tokens"] * p[2]) / 1e6 / 2  # batch: half price
 
 
+FINISHED = ("completed", "failed", "expired", "cancelled")
+
+
+def collect_reblind(c, b, byid, r):
+    """A second blind answer, by a stronger model, for questions whose first blind answer was wrong."""
+    out_path = os.path.join(ROOT, b["out"])
+    out = load(out_path, {})
+    spent, fixed = 0.0, set()
+    if r.output_file_id:
+        for raw in c.files.content(r.output_file_id).text.splitlines():
+            row = json.loads(raw)
+            qid = row["custom_id"].split("__", 1)[1]
+            body = (row.get("response") or {}).get("body") or {}
+            spent += cost(body.get("usage"), b["jobs"]["blind"]["model"])
+            choice = (body.get("choices") or [{}])[0]
+            content = (choice.get("message") or {}).get("content")
+            if choice.get("finish_reason") != "stop" or not content or qid not in out:
+                continue
+            ans = json.loads(content)["answer"]
+            v = out[qid]
+            v["blind2"] = {"model": b["jobs"]["blind"]["model"], "answer": ans}
+            if ans == byid[qid]["correctIndex"] + 1:
+                v["flags"] = [f for f in v.get("flags", []) if not f.startswith("сліпа відповідь")]
+                v["status"] = "review" if v["flags"] else "ok"
+                fixed.add(qid)
+    save(out_path, out)
+    b.update(collected=True, cost_usd=round(spent, 4), done=len(fixed))
+    print(f"second blind check: {len(fixed)} of {b['n']} now agree with the official answer "
+          f"and are publishable (unless flagged otherwise), ${spent:.3f}")
+    return fixed
+
+
+def collect_part(c, b, byid):
+    """Merge one finished part into its results file. Returns None while it is still running,
+    else the set of question ids that got a result (the rest can be sent again)."""
+    runs = {kind: c.batches.retrieve(j["id"]) for kind, j in b["jobs"].items()}
+    if any(r.status not in FINISHED for r in runs.values()):
+        return None
+    if b.get("reblind"):
+        return collect_reblind(c, b, byid, runs["blind"])
+    got, spent, limit_hit = {}, 0.0, False
+    for kind, r in runs.items():
+        model = b["jobs"][kind]["model"]
+        for e in (r.errors.data if r.errors else []):
+            limit_hit |= "limit" in (e.code or "")
+            print(f"  {kind} {r.id}: {r.status} — {e.code}: {e.message}")
+        if not r.output_file_id:  # failed or cancelled before anything ran: nothing was billed
+            continue
+        for raw in c.files.content(r.output_file_id).text.splitlines():
+            row = json.loads(raw)
+            qid = row["custom_id"].split("__", 1)[1]
+            body = (row.get("response") or {}).get("body") or {}
+            spent += cost(body.get("usage"), model)
+            choice = (body.get("choices") or [{}])[0]
+            msg = choice.get("message") or {}
+            if row.get("error") or choice.get("finish_reason") != "stop" or not msg.get("content"):
+                continue
+            try:
+                got.setdefault(qid, {})[kind] = json.loads(msg["content"])
+            except json.JSONDecodeError:
+                continue
+        if r.error_file_id:
+            errs = c.files.content(r.error_file_id).text.splitlines()
+            limit_hit |= any("quota" in x or "limit" in x for x in errs)
+            print(f"  {kind}: {len(errs)} requests errored, e.g. {errs[0][:200] if errs else ''}")
+    out_path = os.path.join(ROOT, b["out"])
+    out = load(out_path, {})
+    for qid, g in got.items():
+        if "blind" not in g or "explain" not in g:
+            continue  # the question goes out again; its half that did succeed is lost, but billed
+        q, e = byid[qid], g["explain"]
+        n, right = len(q["options"]), q["correctIndex"] + 1
+        blind_ok = g["blind"]["answer"] == right
+        out[qid] = {
+            "label": e["label"].strip(),
+            "situation": e["situation"].strip(),
+            "steps": [s_.strip() for s_ in e["steps"] if s_.strip()],
+            "text": e["explanation"].strip(),
+            "wrong": {str(w["option"]): w["why"].strip() for w in e["wrong"]
+                      if 1 <= w["option"] <= n and w["option"] != right},
+            "trap": e["trap"].strip(),
+            "what_if": e["what_if"].strip(),
+            "rules": [k for k in dict.fromkeys(e["rules"])
+                      if k in RULES and k in b.get("seen", {}).get(qid, RULES)],
+            "model": b["jobs"]["explain"]["model"], "check_model": b["jobs"]["blind"]["model"],
+            "blind": g["blind"]["answer"],
+            "at": datetime.date.today().isoformat(),  # shown as "оновлено" and used as sitemap lastmod
+        }
+        out[qid]["flags"] = ([] if blind_ok else [f"сліпа відповідь {g['blind']['answer']}"]) + \
+            ([] if e["agrees"] else ["модель не погодилась"]) + lint(out[qid])
+        # published only when both passes agree with the official answer and the text is clean
+        out[qid]["status"] = "review" if out[qid]["flags"] else "ok"
+    save(out_path, out)
+    done = {qid for qid, g in got.items() if len(g) == 2}
+    b.update(collected=True, cost_usd=round(spent, 4), done=len(done), limit_hit=limit_hit)
+    ok = sum(1 for qid in done if out[qid]["status"] == "ok")
+    print(f"part of {b['n']}: {len(done)} done, {ok} publishable, {len(done) - ok} to review, "
+          f"{b['n'] - len(done)} to send again, ${spent:.3f}")
+    return done
+
+
 def cmd_collect(a):
     c = client()
     st = load(STATE, {"batches": []})
     byid = {q["legacyId"]: q for q in QDATA["questions"]}
     for b in pending(st):
-        runs = {kind: c.batches.retrieve(j["id"]) for kind, j in b["jobs"].items()}
-        waiting = [f"{k}: {r.status}" for k, r in runs.items()
-                   if r.status in ("validating", "in_progress", "finalizing", "cancelling")]
-        if waiting:
-            print("not finished yet — " + ", ".join(waiting))
-            continue
-        got, spent = {}, 0.0
-        for kind, r in runs.items():
-            model = b["jobs"][kind]["model"]
-            if not r.output_file_id:  # failed / cancelled before anything ran
-                print(f"{kind}: {r.status}, no results")
-                continue
-            for raw in c.files.content(r.output_file_id).text.splitlines():
-                row = json.loads(raw)
-                qid = row["custom_id"].split("__", 1)[1]
-                body = (row.get("response") or {}).get("body") or {}
-                spent += cost(body.get("usage"), model)
-                choice = (body.get("choices") or [{}])[0]
-                msg = choice.get("message") or {}
-                if row.get("error") or choice.get("finish_reason") != "stop" or not msg.get("content"):
-                    print(f"{row['custom_id']}: failed ({choice.get('finish_reason')}) — resubmit with --ids {qid}")
-                    continue
-                got.setdefault(qid, {})[kind] = json.loads(msg["content"])
-            if r.error_file_id:
-                print(f"{kind}: some requests errored: {c.files.content(r.error_file_id).text[:300]}")
-        out_path = os.path.join(ROOT, b["out"])
-        out = load(out_path, {})
-        for qid, g in got.items():
-            if "blind" not in g or "explain" not in g:
-                continue
-            q, e = byid[qid], g["explain"]
-            n, right = len(q["options"]), q["correctIndex"] + 1
-            blind_ok = g["blind"]["answer"] == right
-            out[qid] = {
-                "label": e["label"].strip(),
-                "situation": e["situation"].strip(),
-                "steps": [s.strip() for s in e["steps"] if s.strip()],
-                "text": e["explanation"].strip(),
-                "wrong": {str(w["option"]): w["why"].strip() for w in e["wrong"]
-                          if 1 <= w["option"] <= n and w["option"] != right},
-                "trap": e["trap"].strip(),
-                "what_if": e["what_if"].strip(),
-                "rules": [k for k in dict.fromkeys(e["rules"])
-                          if k in RULES and k in b.get("seen", {}).get(qid, RULES)],
-                "model": b["jobs"]["explain"]["model"], "check_model": b["jobs"]["blind"]["model"],
-                "blind": g["blind"]["answer"],
-                "at": datetime.date.today().isoformat(),  # shown as "оновлено" and used as sitemap lastmod
-            }
-            out[qid]["flags"] = ([] if blind_ok else [f"сліпа відповідь {g['blind']['answer']}"]) + \
-                ([] if e["agrees"] else ["модель не погодилась"]) + lint(out[qid])
-            # published only when both passes agree with the official answer and the text is clean
-            out[qid]["status"] = "review" if out[qid]["flags"] else "ok"
-        save(out_path, out)
-        b["collected"] = True
-        b["cost_usd"] = round(spent, 4)
+        if collect_part(c, b, byid) is None:
+            print(f"part of {b['n']}: still running")
         save(STATE, st)
-        both = [qid for qid, g in got.items() if len(g) == 2]
-        ok = sum(1 for qid in both if out[qid]["status"] == "ok")
-        print(f"{len(both)} questions, {ok} publishable, {len(both) - ok} to review, ${spent:.3f} -> {b['out']}")
+
+
+def cmd_reblind(a):
+    """Send the questions held back only because the blind answer differed to a stronger model,
+    blind again. Collect with `collect`. Text and other flags are left as they are."""
+    out = load(os.path.abspath(a.out), {})
+    ids = [qid for qid, v in out.items() if v.get("status") == "review" and v.get("flags")
+           and all(f.startswith("сліпа відповідь") for f in v["flags"]) and "blind2" not in v]
+    byq = {q["legacyId"]: q for q in category_b()}
+    qs = [byq[i] for i in ids if i in byq]
+    if not qs:
+        sys.exit("nothing to re-check")
+    ret = Retriever(category_b())
+    os.makedirs(WORK, exist_ok=True)
+    st = load(STATE, {"batches": []})
+    path = os.path.join(WORK, f"explain_requests_{len(st['batches'])}_reblind.jsonl")
+    with open(path, "w", encoding="utf-8") as f:
+        f.writelines(json.dumps(line(q, ret.context(q), "blind", a.model), ensure_ascii=False) + "\n" for q in qs)
+    print(f"{len(qs)} questions to {a.model}, {os.path.getsize(path) / 1e6:.1f} MB")
+    if a.dry_run:
+        return
+    c = client()
+    up = c.files.create(file=open(path, "rb"), purpose="batch")
+    bb = c.batches.create(input_file_id=up.id, endpoint="/v1/chat/completions", completion_window="24h")
+    st["batches"].append({"jobs": {"blind": {"id": bb.id, "model": a.model}}, "reblind": True,
+                          "out": os.path.relpath(os.path.abspath(a.out), ROOT), "n": len(qs), "collected": False})
+    save(STATE, st)
+    print(f"submitted {bb.id}; run `collect` when `status` says completed")
+
+
+def needs_work(v):
+    # Results from before label/situation existed are made again; everything else is kept.
+    return v is None or "label" not in v
+
+
+def cmd_run(a):
+    """Send everything that still needs an explanation in parts, at most --max-active parts at a
+    time, collect each part when it is done, and stop before --budget dollars. Safe to stop with
+    Ctrl+C and start again: it continues from the state in work/explain_batches.json."""
+    import time
+    c = client()
+    byid = {q["legacyId"]: q for q in QDATA["questions"]}
+    allq = category_b()
+    ret = None
+    max_active = a.max_active
+    last_line, last_print = "", 0.0
+    while True:
+        st = load(STATE, {"batches": []})
+        for b in pending(st):
+            if collect_part(c, b, byid) is not None:
+                save(STATE, st)
+                if b.get("limit_hit") and max_active > 1:
+                    max_active -= 1
+                    print(f"queue or quota limit reached: at most {max_active} parts at a time from now on")
+        run_parts = [b for b in st["batches"] if b.get("run") == a.run_id]
+        spent = sum(b.get("cost_usd", 0) for b in run_parts)
+        done_n = sum(b.get("done", 0) for b in run_parts if b["collected"])
+        per_q = spent / done_n if done_n else a.guess
+        active = pending(st)
+        in_flight = {qid for b in active for qid in b.get("seen", {})}
+        out = load(os.path.abspath(a.out), {})
+        tries = {}
+        for b in run_parts:
+            for qid in b.get("seen", {}):
+                tries[qid] = tries.get(qid, 0) + 1
+        # A question that failed three times is left for a look by hand instead of paying for it again.
+        todo = [q for q in allq if needs_work(out.get(q["legacyId"])) and q["legacyId"] not in in_flight
+                and tries.get(q["legacyId"], 0) < 3]
+        given_up = [q["legacyId"] for q in allq
+                    if needs_work(out.get(q["legacyId"])) and tries.get(q["legacyId"], 0) >= 3]
+        if a.limit:
+            todo = todo[:max(0, a.limit - done_n - sum(b["n"] for b in active))]
+        reserved = sum(b["n"] for b in active) * per_q
+        line_ = (f"spent ${spent:.2f} on {done_n} questions (≈${per_q:.4f} each), "
+                 f"{len(active)} parts running, {len(todo)} questions left")
+        # Print when something changed, otherwise a heartbeat every 10 minutes while waiting.
+        if line_ != last_line or time.time() - last_print > 600:
+            print(f"[{time.strftime('%H:%M')}] {line_}" + ("" if line_ != last_line else " (still waiting)"))
+            last_line, last_print = line_, time.time()
+        if not todo and not active and a.limit and done_n >= a.limit:
+            print(f"--limit {a.limit} reached for run '{a.run_id}': start again with a bigger --limit to go on")
+            return
+        if not todo and not active:
+            print("all done" + (f"; no result after 3 tries for {len(given_up)}: {', '.join(given_up)} "
+                                f"(send them again with `submit --ids ...`)" if given_up else ""))
+            return
+        while todo and len(active) < max_active:
+            part = todo[:a.chunk]
+            if spent + reserved + len(part) * per_q > a.budget:
+                print(f"budget ${a.budget:.2f} would be exceeded: not sending more"
+                      + ("" if active else "; raise --budget to go on"))
+                if not active:
+                    return
+                break
+            if ret is None:
+                ret = Retriever(allq)
+            ctx = {q["legacyId"]: ret.context(q) for q in part}
+            jobs = {}
+            for kind, model in (("blind", a.check_model), ("explain", a.model)):
+                path = os.path.join(WORK, f"explain_requests_{len(st['batches'])}_{kind}.jsonl")
+                with open(path, "w", encoding="utf-8") as f:
+                    f.writelines(json.dumps(line(q, ctx[q["legacyId"]], kind, model), ensure_ascii=False) + "\n"
+                                 for q in part)
+                up = c.files.create(file=open(path, "rb"), purpose="batch")
+                bb = c.batches.create(input_file_id=up.id, endpoint="/v1/chat/completions", completion_window="24h")
+                jobs[kind] = {"id": bb.id, "model": model}
+            entry = {"jobs": jobs, "out": os.path.relpath(os.path.abspath(a.out), ROOT), "n": len(part),
+                     "run": a.run_id, "collected": False,
+                     "seen": {q["legacyId"]: sorted({k for k in re.findall(r"^(\d+(?:\.\d+)+)\. ",
+                                                                          ctx[q["legacyId"]], re.M) if k in RULES})
+                              for q in part}}
+            st["batches"].append(entry)
+            save(STATE, st)
+            active.append(entry)
+            reserved += len(part) * per_q
+            todo = todo[len(part):]
+            print(f"  sent a part of {len(part)} questions")
+        time.sleep(a.every)
 
 
 def cmd_recheck(a):
@@ -557,13 +729,29 @@ if __name__ == "__main__":
     s.add_argument("--model", default=WRITER)
     s.add_argument("--check-model", default=CHECKER)
     s.add_argument("--out", default=DEFAULT_OUT)
-    s.add_argument("--dry-run", action="store_true", help="write the request file, send nothing")
+    s.add_argument("--dry-run", action="store_true", help="write the request files to work/dry-run, send nothing")
+    s.add_argument("--chunk", type=int, default=200, help="questions per batch (default 200)")
     sub.add_parser("status")
     sub.add_parser("collect")
+    r = sub.add_parser("reblind", help="second blind check by a stronger model for blind-only disagreements")
+    r.add_argument("--model", default="gpt-5.1")
+    r.add_argument("--out", default=DEFAULT_OUT)
+    r.add_argument("--dry-run", action="store_true")
+    r = sub.add_parser("run", help="send, wait, collect and repeat until done or out of budget")
+    r.add_argument("--budget", type=float, required=True, help="stop sending before this many dollars")
+    r.add_argument("--limit", type=int, help="at most this many questions in this run")
+    r.add_argument("--chunk", type=int, default=100, help="questions per part (default 100)")
+    r.add_argument("--max-active", type=int, default=3, help="parts in flight at once (default 3)")
+    r.add_argument("--every", type=int, default=60, help="seconds between checks (default 60)")
+    r.add_argument("--guess", type=float, default=0.012, help="$ per question until the first part is in")
+    r.add_argument("--run-id", default="main", help="budget is counted per run id")
+    r.add_argument("--model", default=WRITER)
+    r.add_argument("--check-model", default=CHECKER)
+    r.add_argument("--out", default=DEFAULT_OUT)
     r = sub.add_parser("review")
     r.add_argument("--out", default=DEFAULT_OUT)
     r = sub.add_parser("recheck")
     r.add_argument("--out", default=DEFAULT_OUT)
     a = p.parse_args()
     {"submit": cmd_submit, "status": cmd_status, "collect": cmd_collect, "review": cmd_review,
-     "recheck": cmd_recheck}[a.cmd](a)
+     "recheck": cmd_recheck, "run": cmd_run, "reblind": cmd_reblind}[a.cmd](a)

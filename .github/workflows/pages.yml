@@ -41,4 +41,5 @@ jobs:
           path: _site
       - id: deployment
         uses: actions/deploy-pages@v4
-      - run: python indexnow.py old_sitemap.xml _site/sitemap.xml
+      # IndexNow checks the key file on the live site: give the CDN a minute to serve the new build.
+      - run: sleep 60 && python indexnow.py old_sitemap.xml _site/sitemap.xml

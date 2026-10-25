@@ -728,4 +728,7 @@ a.xp-meta-i { color: var(--accent); }
 .why-box .xp-wrong li { background: var(--surface); }
 .why-box .xp-wrong li.xp-mine { background: var(--bad-soft); }
 .brand-logo { width: 28px; height: 28px; vertical-align: -6px; margin-right: 8px; border-radius: 7px; }
-.gsi-btn { min-height: 44px; display: flex; justify-content: center; }
+/* Google's button sits in an iframe; when the page is in a dark colour scheme and the frame in
+   a light one, browsers paint the frame's background opaque white. Same scheme = transparent. */
+.gsi-btn { min-height: 44px; display: flex; justify-content: center; color-scheme: light; }
+.gsi-btn iframe { color-scheme: light; background: transparent; }

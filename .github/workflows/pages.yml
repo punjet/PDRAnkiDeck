@@ -17,7 +17,7 @@ concurrency:
 
 env:
   # Own domain: set to e.g. https://example.com.ua/ (also writes CNAME).
-  SITE_URL: https://punjet.github.io/PDRAnkiDeck/
+  SITE_URL: https://zdaipdr.com.ua/
   # How many explained question pages are live; raise it every week or two (0 = all).
   SEO_MAX_EXPLAINED: "200"
 

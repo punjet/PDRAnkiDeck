@@ -7,7 +7,7 @@
 
 ## Вчити в браузері — без Anki
 
-**https://punjet.github.io/PDRAnkiDeck/** — ті самі 1762 питання, той самий порядок, без
+**https://zdaipdr.com.ua/** — ті самі 1762 питання, той самий порядок, без
 встановлення й реєстрації:
 
 - інтервальні повторення **FSRS-6** — той самий алгоритм і стандартні параметри, що в Anki
@@ -35,7 +35,7 @@
 Застосунок безкоштовний і без реклами; натомість він збирає анонімну статистику
 навчання для відкритого дослідження про підготовку до іспиту. Збір увімкнено за
 замовчуванням; вимкнути можна на сторінці
-[«Конфіденційність»](https://punjet.github.io/PDRAnkiDeck/privacy.html) (посилання внизу головної).
+[«Конфіденційність»](https://zdaipdr.com.ua/privacy.html) (посилання внизу головної).
 
 - **Збирається:** випадковий ідентифікатор браузера, номер питання, обрана відповідь і чи
   правильна, час на відповідь, оцінка FSRS і стан картки, день підготовки, година доби,
@@ -54,9 +54,9 @@
 Щоб бачити, звідки приходять люди, додавайте до посилання будь-яку свою мітку `?src=`:
 
 ```
-https://punjet.github.io/PDRAnkiDeck/?src=reddit_ukraina
-https://punjet.github.io/PDRAnkiDeck/?src=tg_avtoshkola_kyiv
-https://punjet.github.io/PDRAnkiDeck/?src=fb_prava_lviv
+https://zdaipdr.com.ua/?src=reddit_ukraina
+https://zdaipdr.com.ua/?src=tg_avtoshkola_kyiv
+https://zdaipdr.com.ua/?src=fb_prava_lviv
 ```
 
 - мітка — латиниця, цифри, `_ - .`, до 40 символів (інше замінюється на `_`, великі літери стають малими);
@@ -177,7 +177,7 @@ push у `main`. Локально: `python build_web.py data _site && python -m h
 пунктом, а також `tema/<тема>/` (теми з `data/topics.json`), `ispyt/` (пробний іспит), `pro/` (про проєкт і перевірку
 відповідей), `404.html`, `sitemap.xml` з `lastmod`, `robots.txt` і `CNAME`. Після кожного деплою
 `indexnow.py` повідомляє Bing про нові й змінені сторінки (ключ — `web/<ключ>.txt`). Адреса сайту береться зі змінної
-`SITE_URL` (типово `https://punjet.github.io/PDRAnkiDeck/`); для власного домену задайте її
+`SITE_URL` (`https://zdaipdr.com.ua/`); при зміні домену задайте її
 в `.github/workflows/pages.yml`.
 
 Сторінка питання індексується лише тоді, коли в `data/explanations.json` для нього є перевірене

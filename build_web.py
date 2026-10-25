@@ -29,7 +29,9 @@ os.makedirs(os.path.join(OUT, "img"))
 
 # Confusable neighbours from similar.py (optional): ids of look-alike questions with another answer.
 sim_path = os.path.join(DATA, "similar.json")
-SIM = json.load(open(sim_path, encoding="utf-8"))["similar"] if os.path.exists(sim_path) else {}
+SIMJ = json.load(open(sim_path, encoding="utf-8")) if os.path.exists(sim_path) else {}
+SIM = SIMJ.get("similar", {})
+NEAR = SIMJ.get("near", {})   # closest questions by meaning, any answer: hints for auto-grading
 
 out = []
 seo = []  # same entries plus the section id, for build_seo
@@ -64,6 +66,8 @@ for q in ordered(data["questions"]):
     })
     if SIM.get(q["legacyId"]):
         out[-1]["sim"] = [i for i, _ in SIM[q["legacyId"]]]
+    if NEAR.get(q["legacyId"]):
+        out[-1]["nb"] = NEAR[q["legacyId"]]
     seo.append({**out[-1], "section": q["section"]})
 
 # Search keywords from topics.py (optional): phrases people type, Ukrainian and Russian.
@@ -79,9 +83,10 @@ TOPICS = json.load(open(topics_path, encoding="utf-8"))["topics"] if os.path.exi
 
 known_ids = {e["id"] for e in out}
 for e in out:   # a neighbour may be a question left out of category B
-    keep = [i for i in e.pop("sim", []) if i in known_ids]
-    if keep:
-        e["sim"] = keep
+    for k in ("sim", "nb"):
+        keep = [i for i in e.pop(k, []) if i in known_ids]
+        if keep:
+            e[k] = keep
 
 payload = {
     "source": "ГСЦ МВС, наказ № 225 від 29.10.2025",

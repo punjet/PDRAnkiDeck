@@ -253,3 +253,13 @@ select app_ver, round(100.0 * avg(auto_rated::int) filter (where correct), 1) as
        round(count(*)::numeric / nullif((select sum(m) from (select max(active_s) / 60.0 m from pings p
          where p.app_ver = a.app_ver group by sid) x), 0), 2) as answers_per_min
 from answers a where mode = 'study' group by app_ver order by app_ver;
+
+-- 26. Auto-grading (grade.js): how often its guess matches the grade people give by hand,
+-- and the confusion matrix (rows: hand grade, columns: guess).
+select rating as hand,
+       count(*) filter (where auto_guess = 2) as guess_hard,
+       count(*) filter (where auto_guess = 3) as guess_good,
+       count(*) filter (where auto_guess = 4) as guess_easy,
+       round(100.0 * avg((auto_guess = rating)::int), 1) as agree_pct
+from answers where mode = 'study' and correct and not coalesce(auto_rated, false) and auto_guess is not null
+group by rating order by rating;

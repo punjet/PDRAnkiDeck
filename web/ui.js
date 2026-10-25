@@ -114,7 +114,8 @@ export function confetti() {
 
 // In-page confirm: native confirm() is a grey system box on phones and blocks the timer.
 // Resolves true for the confirm button, false for cancel, Esc or a tap outside.
-export function ask(text, { ok = "Так", cancel = "Скасувати", danger = false } = {}) {
+// note: an optional plain-text explanation under the question.
+export function ask(text, { ok = "Так", cancel = "Скасувати", danger = false, note = "" } = {}) {
   if (typeof HTMLDialogElement !== "function") return Promise.resolve(confirm(text));
   return new Promise((resolve) => {
     const d = document.createElement("dialog");
@@ -122,6 +123,7 @@ export function ask(text, { ok = "Так", cancel = "Скасувати", danger
     // Padding sits on the inner box, so a tap on the dialog element itself is a tap outside.
     d.innerHTML = `<div class="sheet-body">
       <p>${esc(text)}</p>
+      ${note ? `<p class="sheet-note">${esc(note)}</p>` : ""}
       <div class="actions">
         <button class="${danger ? "danger" : "primary"}" value="ok">${esc(ok)}</button>
         <button value="">${esc(cancel)}</button>

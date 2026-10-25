@@ -5,6 +5,7 @@ import { fsrs, generatorParameters, createEmptyCard, Rating, State }
   from "./vendor/ts-fsrs-5.4.2.mjs";
 import * as tele from "./telemetry.js";
 import MiniSearch from "./vendor/minisearch-7.2.0.mjs";
+import * as grader from "./grade.js";
 import { esc, plural, clipText, shuffle, ICON, topBar, dock, emptyState, announce, toast,
   confetti as confettiRaw, ask } from "./ui.js";
 
@@ -44,10 +45,12 @@ function defaultState() {
     days: {},         // day index -> answers that day (any mode): streak and activity strip
     best: { combo: 0 },
     plan: { examDate: null, remindAt: null },   // "YYYY-MM-DD", "HH:MM"
-    ui: { installLaterAt: 0 },
+    ui: { installLaterAt: 0, tourDone: false },
     // shuffle: options in a new order each time, like the HSC exam; auto: a right answer
-    // is graded "Добре" by itself after a moment; motion: animations.
-    prefs: { shuffle: true, auto: true, motion: true },
+    // is graded by grade.js and the next question comes by itself; autoAsked: auto was
+    // offered after the first manual grades (it starts off); motion: animations.
+    prefs: { shuffle: true, auto: false, autoAsked: false, motion: true },
+    grade: null,      // grade.js model: this person's pace and how they grade by hand
     wrong: {},        // id -> unix ms of the last wrong answer (study or exam)
     exams: [],        // {at, errors, total, passed}
     firstSeen: null,  // unix ms of the first launch: "day of preparation" for stats
@@ -178,6 +181,7 @@ function undoRate(u) {
   S.day = u.day;
   if (u.wrong === undefined) delete S.wrong[u.id]; else S.wrong[u.id] = u.wrong;
   S.logs.length = u.logs;
+  if (u.grade) S.grade = u.grade;
   save();
 }
 
@@ -607,7 +611,7 @@ function go(v) {
 }
 
 // ---- auto-advance after a right answer ----
-const AUTO_MS = 1400;
+const AUTO_MS = 2500;   // long enough to read the verdict and the grade picked
 let autoTimer = null;
 function armAuto(fn) {
   if (autoTimer) clearTimeout(autoTimer);
@@ -684,6 +688,128 @@ function optionsHtml(q, { chosen = null, reveal = false, selected = null, perm =
     return `<li><button class="${cls}" data-opt="${i}" ${reveal ? "disabled" : ""}>
       <span class="n">${pos + 1}</span><span>${esc(q.o[i])}</span></button></li>`;
   }).join("")}</ul>`;
+}
+
+// ---- first-launch tour ----
+// Four short cards before the first question: why spaced repetition, what comes first,
+// how to answer and grade, and the pace. Shown once to people with no progress yet,
+// and again from Settings -> "Як це працює". A modal over the home screen, so the
+// home page itself (and its text for search engines) stays as it is.
+function tourSlides() {
+  const n = DB.questions.length;
+  const g = (label, sub, cls = "") => `<span class="tour-grade ${cls}"><b>${label}</b><small>${sub}</small></span>`;
+  return [
+    { emoji: "🧠", title: "Вчіть розумніше, а не довше",
+      body: `<p>Алгоритм <b>FSRS</b> — той самий, що в Anki, — показує кожне питання саме тоді, коли ви от-от його забудете.</p>
+        <p>Знайоме повторюється рідше, складне — частіше. Тому всі ${n} питань вкладаються в 1–2 тижні по 2 години на день, без зубріння по колу.</p>` },
+    { emoji: "🎯", title: "Спершу — те, що буде в білеті",
+      body: `<p>Питання йдуть від тих, що найчастіше трапляються на іспиті, до рідкісних.</p>
+        <p><b>Пробний іспит</b> — як у сервісному центрі: 20 питань, 20 хвилин, не більше 2 помилок. А <b>«Шанс скласти»</b> на головній покаже, чи ви вже готові.</p>` },
+    { emoji: "✋", title: "Як відповідати",
+      body: `<p>Оберіть варіант. Якщо правильно — скажіть, наскільки легко було:</p>
+        <div class="tour-grades">${g("Важко", "повторимо скоро")}${g("Добре", "як зазвичай", "on")}${g("Легко", "нескоро")}</div>
+        <p>Помилка — питання повернеться за кілька хвилин, а поруч будуть схожі питання, які легко сплутати.</p>
+        <p class="note">Коли звикнете, можна ввімкнути автоперехід: алгоритм сам оцінюватиме відповіді за часом і вашою історією.</p>` },
+    { emoji: "📅", title: "Скільки часу до іспиту?",
+      body: `<div class="seg" role="radiogroup" aria-label="Темп підготовки">${Object.entries(PRESETS).map(([k, p]) =>
+          `<button role="radio" aria-checked="${S.settings.preset === k}" data-tour-preset="${k}" class="${S.settings.preset === k ? "on" : ""}">
+            ${p.label}<small>${p.newPerDay} нових на день</small></button>`).join("")}</div>
+        <p class="note">${esc(PACE_NOTE[S.settings.preset] || PACE_NOTE.custom)} Змінити можна будь-коли в налаштуваннях.</p>` },
+  ];
+}
+
+function showTour(from = "start") {
+  if (typeof HTMLDialogElement !== "function") { S.ui.tourDone = true; save(); return; }
+  const slides = tourSlides();
+  let i = 0;
+  const d = document.createElement("dialog");
+  d.className = "sheet tour";
+  d.setAttribute("aria-label", "Як це працює");
+  const draw = () => {
+    const sl = slides[i], last = i === slides.length - 1;
+    d.innerHTML = `<div class="sheet-body">
+      <div class="tour-dots" aria-hidden="true">${slides.map((_, k) => `<i class="${k === i ? "on" : ""}"></i>`).join("")}</div>
+      <div class="tour-emoji" aria-hidden="true">${sl.emoji}</div>
+      <h2 tabindex="-1">${sl.title}</h2>
+      <div class="tour-body stack">${sl.body}</div>
+      <div class="tour-nav">
+        ${last ? "" : `<button class="ghost" data-tour="skip">Пропустити</button>`}
+        <button class="primary grow" data-tour="next">${last ? (from === "start" ? "Почати навчання" : "Зрозуміло") : "Далі"}</button>
+      </div></div>`;
+    d.querySelector("h2").focus({ preventScroll: true });
+  };
+  d.addEventListener("click", (e) => {
+    const b = e.target.closest("button");
+    if (!b) return;
+    if (b.dataset.tourPreset) {
+      S.settings = { preset: b.dataset.tourPreset, ...PRESETS[b.dataset.tourPreset] };
+      save(); makeScheduler();
+      d.querySelectorAll("[data-tour-preset]").forEach((x) => {
+        const on = x === b;
+        x.classList.toggle("on", on); x.setAttribute("aria-checked", on);
+      });
+      d.querySelector(".tour-body .note").textContent = `${PACE_NOTE[b.dataset.tourPreset]} Змінити можна будь-коли в налаштуваннях.`;
+      return;
+    }
+    if (b.dataset.tour === "skip") return d.close("skip");
+    if (b.dataset.tour === "next") {
+      if (i === slides.length - 1) return d.close("done");
+      i++; draw();
+    }
+  });
+  d.addEventListener("close", () => {
+    const how = d.returnValue || "skip";
+    d.remove();
+    S.ui.tourDone = true; save();
+    ev("tour", how, i + 1);
+    if (how === "done" && from === "start") go({ name: "study" });
+    else if (view.name === "home" || view.name === "settings") render();
+  });
+  document.body.appendChild(d);
+  draw();
+  d.showModal();
+}
+
+// ---- auto-grading (grade.js) ----
+const RATING_LABEL = { [Rating.Hard]: "Важко", [Rating.Good]: "Добре", [Rating.Easy]: "Легко" };
+const AUTO_OFFER_AFTER = 20;   // right answers graded by hand before auto-advance is offered
+
+// What the person knows of a question, for the neighbour hints: 1 known, 0.5 learning,
+// 0 a mistake in the last week, null not seen yet.
+function knowOf(id) {
+  if (S.wrong[id] && Date.now() - S.wrong[id] < 7 * 864e5) return 0;
+  const c = S.cards[id];
+  if (!c) return null;
+  return c.state === State.Review ? 1 : 0.5;
+}
+
+function lastRatingOf(id) {
+  for (let i = S.logs.length - 1; i >= 0; i--) if (S.logs[i][0] === id) return S.logs[i][2];
+  return null;
+}
+
+function autoGrade(q, rtMs) {
+  return grader.grade(q, rtMs, {
+    model: S.grade, card: S.cards[q.id], lastRating: lastRatingOf(q.id),
+    wrongAt: S.wrong[q.id] || null, know: knowOf,
+  });
+}
+
+// Offered once, after enough grades by hand: by then the algorithm has learnt this
+// person's pace and how they grade.
+async function offerAuto() {
+  if (S.prefs.autoAsked || S.prefs.auto || S.grade.manual < AUTO_OFFER_AFTER) return;
+  S.prefs.autoAsked = true; save();
+  const yes = await ask("Увімкнути автоперехід?", {
+    note: "Після правильної відповіді алгоритм сам оцінить, наскільки легко було — за часом відповіді, "
+      + "вашою історією цього питання і схожими питаннями — і натисне «Важко», «Добре» чи «Легко» за вас. "
+      + "Ви бачитимете, що він обрав і чому. Вимкнути можна в налаштуваннях.",
+    ok: "Так, увімкнути", cancel: "Ні, оцінюватиму сам" });
+  S.prefs.auto = yes; save();
+  // The time spent on the dialog is not time spent thinking about the card under it.
+  if (view.name === "study" && view.state && view.state.chosen === null) view.state.shownAt = activeNow();
+  ev("auto_offer", yes ? "yes" : "no", S.grade.manual);
+  if (yes) toast("Автоперехід увімкнено");
 }
 
 // The question with its options and, once answered, the verdict. Study, drill, topic
@@ -922,15 +1048,17 @@ function renderStudy() {
   view.state = st;
   const answered = st.chosen !== null;
   const correct = answered && st.chosen === q.a;
-  const auto = answered && correct && st.auto;
+  const autoOn = answered && correct && st.auto;
+  // With auto-advance the algorithm's grade is the highlighted button that fills up;
+  // by hand "Добре" is the default, as in Anki.
+  const pickR = autoOn && st.g ? st.g.rating : Rating.Good;
   let actions = "";
   if (answered) {
     const iv = previewIntervals(q.id);
     actions = correct
-      ? `<div class="grades">
-           <button data-rate="${Rating.Hard}">Важко<small>${iv[Rating.Hard]}</small></button>
-           <button class="primary ${auto ? "auto" : ""}" data-rate="${Rating.Good}" style="--auto:${AUTO_MS}ms">Добре<small>${iv[Rating.Good]}</small></button>
-           <button data-rate="${Rating.Easy}">Легко<small>${iv[Rating.Easy]}</small></button>
+      ? `<div class="grades">${[Rating.Hard, Rating.Good, Rating.Easy].map((r) =>
+           `<button class="${r === pickR ? `primary ${autoOn ? "auto" : ""}` : ""}" data-rate="${r}" style="--auto:${AUTO_MS}ms">${
+             RATING_LABEL[r]}<small>${iv[r]}</small></button>`).join("")}
          </div>`
       : `<button class="primary block big" data-rate="${Rating.Again}">Далі · знову через ${iv[Rating.Again]}</button>`;
   } else if (view.undo) {
@@ -946,8 +1074,8 @@ function renderStudy() {
   <div class="bar thin" role="progressbar" aria-label="Ціль на сьогодні" aria-valuenow="${goal.pct}" aria-valuemin="0" aria-valuemax="100"
     title="Ціль на сьогодні: ${goal.done} з ${goal.done + goal.left}">${barSpan("goal", goal.pct, "b-known")}</div>
   ${quizCard(q, { chosen: st.chosen, perm: st.perm, anim: st.anim,
-    right: `${comboHtml()}<span class="hint">${auto
-      ? "Далі за мить. Торкніться картки, щоб зупинитися, або оцініть самі."
+    right: `${comboHtml()}<span class="hint">${autoOn
+      ? `Оцінка «${RATING_LABEL[pickR]}»: ${st.g.reason}. Далі за мить — торкніться картки, щоб зупинитися, або оцініть самі.`
       : "Наскільки легко було?"}</span>`,
     extra: twinsHtml(q) })}
   ${dock(actions)}`);
@@ -1170,7 +1298,7 @@ function renderSettings() {
     <section class="card stack">
       <h2>Навчання</h2>
       ${[["shuffle", "Перемішувати варіанти відповідей", "Як на іспиті в сервісному центрі: запам'ятовуєте відповідь, а не її номер. Питання з варіантами «Відповіді 1 і 2» не перемішуються."],
-         ["auto", "Автоперехід після правильної відповіді", `Через ${AUTO_MS / 1000} с ставиться «Добре». Торкніться картки, щоб зупинити, або оцініть самі.`],
+         ["auto", "Автоперехід після правильної відповіді", `Алгоритм сам ставить «Важко», «Добре» чи «Легко» — за часом відповіді, вашою історією цього питання і схожими питаннями — і через ${String(AUTO_MS / 1000).replace(".", ",")} с переходить далі. Торкніться картки, щоб зупинити, або оцініть самі.`],
          ["motion", "Анімації", "Переходи між питаннями, конфеті за досягнення."]].map(([k, title, note]) => `
         <div class="pref">
           <div id="pref-${k}"><b>${title}</b><p class="note">${note}</p></div>
@@ -1204,6 +1332,7 @@ function renderSettings() {
       </div>
       <button class="block text-bad" data-act="reset">Скинути весь прогрес</button>
     </section>
+    <button class="block" data-act="tour">Як це працює</button>
     <footer><p><a href="privacy.html">Конфіденційність</a> · <a href="https://github.com/punjet/PDRAnkiDeck">GitHub</a></p></footer>
   </div>`);
 }
@@ -1488,8 +1617,8 @@ app.addEventListener("click", async (e) => {
   if (act === "export") return exportProgress();
   if (act === "reset") {
     if (await ask("Видалити весь прогрес, історію іспитів і помилки? Це не можна скасувати.", { ok: "Видалити все", danger: true })) {
-      const keep = { tele: S.tele, plan: S.plan };
-      S = { ...defaultState(), ...keep, firstSeen: Date.now() }; save(); makeScheduler(); applyMotion(); go({ name: "home" });
+      const keep = { tele: S.tele, plan: S.plan, ui: S.ui };
+      S = { ...defaultState(), ...keep, grade: grader.newModel(), firstSeen: Date.now() }; save(); makeScheduler(); applyMotion(); go({ name: "home" });
     }
     return;
   }
@@ -1503,11 +1632,14 @@ app.addEventListener("click", async (e) => {
     return go({ name: "practice", ids, i: Math.max(0, start), results: {}, title, back: backOf(view) });
   }
   if (act === "back") return go(view.back || { name: "home" });
+  if (act === "tour") return showTour("settings");
   if (act === "practice-next") return practiceNext();
   if (act === "practice-again") return go({ ...view, i: 0, results: {}, state: null, done: false });
   if (t.dataset.pref) {
     const k = t.dataset.pref;
-    S.prefs[k] = !S.prefs[k]; save();
+    S.prefs[k] = !S.prefs[k];
+    if (k === "auto") S.prefs.autoAsked = true;   // chosen by hand: no need to offer it later
+    save();
     applyMotion();
     return render();
   }
@@ -1618,6 +1750,8 @@ function pickOption(i) {
     }
     const st = view.state;
     announceVerdict(q, i, st.perm);
+    // Graded on every right answer, also by hand: the hand grades calibrate it.
+    if (right && view.name === "study") st.g = autoGrade(q, st.rt);
     st.auto = right && S.prefs.auto;
     st.anim = true;
     render();
@@ -1626,7 +1760,7 @@ function pickOption(i) {
     app.querySelector(".opt.right")?.scrollIntoView({ block: "center", behavior: motionOn() ? "smooth" : "auto" });
     if (first) streakToast();
     if (comboRecord) confetti();
-    if (st.auto) armAuto(() => (view.name === "study" ? doRate(Rating.Good, true)
+    if (st.auto) armAuto(() => (view.name === "study" ? doRate(st.g.rating, true)
       : view.name === "practice" ? practiceNext() : drillNext()));
   }
 }
@@ -1641,16 +1775,26 @@ function renderExamKeepTimer() {
 function doRate(r, auto = false) {
   cancelAuto();
   const id = view.current.id;
+  const g = view.state.g;
   // Logged at grading time so the FSRS state is the one before this answer.
   // An undone answer stays in the stats: the person did answer it that way.
+  // auto_guess next to a hand grade shows how often the algorithm agrees with people.
   trackAnswer(byId[id], "study", view.state.chosen, view.state.rt, r, S.cards[id] || createEmptyCard(new Date()),
-    { shuffled: isShuffled(view.state.perm), auto_rated: auto });
+    { shuffled: isShuffled(view.state.perm), auto_rated: auto, auto_guess: g ? g.rating : null, auto_z: g ? g.z : null });
+  const gradeBefore = structuredClone(S.grade);
+  if (g) {
+    grader.learnPace(S.grade, byId[id], view.state.rt, (S.cards[id]?.reps || 0) > 0);
+    // Hand grades teach the thresholds; tapping the highlighted guess only agrees with it.
+    if (!auto && !(S.prefs.auto && r === g.rating)) grader.learnGrade(S.grade, g.z, r);
+  }
   const undo = rate(id, r);
+  undo.grade = gradeBefore;   // "Скасувати" also takes back what the grader learnt
   // A card failed in a learning step can be due again at once: show something else first.
   const pick = nextCard(id);
   view = { name: "study", undo, current: pick.id ? pick : undefined };
   vt(render, "next");
   checkMilestone();
+  if (!auto && g) setTimeout(offerAuto, 400);
 }
 
 document.addEventListener("keydown", (e) => {
@@ -1684,10 +1828,7 @@ async function importProgress(file) {
     if (data.app !== STORE_KEY || !data.state || typeof data.state.cards !== "object") throw new Error("format");
     if (!(await ask("Замінити поточний прогрес даними з файлу?", { ok: "Замінити", danger: true }))) return;
     S = { ...defaultState(), ...data.state };
-    S.tele = { ...defaultState().tele, ...S.tele };
-    for (const k of ["plan", "ui", "best", "prefs"]) S[k] = { ...defaultState()[k], ...S[k] };
-    S.day = { ...newDay(S.day.key), ...S.day };
-    seedDays();
+    normalize();
     save(); makeScheduler(); applyMotion(); go({ name: "home" });
   } catch (err) {
     toast("Це не файл прогресу цього застосунку");
@@ -1720,13 +1861,28 @@ async function saveOffline(btn) {
   btn.disabled = false;
 }
 
+// Fills in what older saves and exported files lack. Used at start and on import.
+function normalize() {
+  const d = defaultState();
+  S.tele = { ...d.tele, ...S.tele };
+  // Saves from before auto-grading had auto-advance on by default: it now starts off
+  // and is offered once the person has graded a few answers by hand.
+  if (S.prefs && !("autoAsked" in S.prefs)) S.prefs.auto = false;
+  // Progress from before the tour: no tour for people who already use the app.
+  if (S.ui && !("tourDone" in S.ui)) {
+    S.ui.tourDone = S.logs.length > 0 || S.exams.length > 0 || Object.keys(S.wrong).length > 0;
+  }
+  for (const k of ["plan", "ui", "best", "prefs"]) S[k] = { ...d[k], ...S[k] };
+  const g = S.grade;
+  if (!(g?.pace?.new && g.pace.seen && g.cal?.[2] && g.cal[3] && g.cal[4])) S.grade = grader.newModel();
+  S.day = { ...newDay(S.day.key), ...S.day };
+  seedDays();
+}
+
 // ---------- boot ----------
 async function boot() {
   S = load();
-  S.tele = { ...defaultState().tele, ...S.tele };
-  for (const k of ["plan", "ui", "best", "prefs"]) S[k] = { ...defaultState()[k], ...S[k] };
-  S.day = { ...newDay(S.day.key), ...S.day };
-  seedDays();
+  normalize();
   if (!S.firstSeen) S.firstSeen = Date.now();
   if (!S.tele.uid) S.tele.uid = crypto.randomUUID();
   // App icon shortcuts (manifest) open a screen directly: ?go=study|exam|drill
@@ -1758,6 +1914,7 @@ async function boot() {
   if (topicParam && topicById[topicParam]) view = { name: "topic", id: topicParam, back: { name: "home" } };
   render();
   startSession();
+  if (!S.ui.tourDone && !S.logs.length && view.name === "home") showTour("start");
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 }
 

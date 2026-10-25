@@ -113,6 +113,10 @@ create table if not exists public.pings (
 -- "Добре" by the auto-advance timer instead of a tap. `chosen` stays the option's index in the base.
 alter table public.answers add column if not exists shuffled   boolean;
 alter table public.answers add column if not exists auto_rated boolean;
+-- grade.js: the grade the algorithm would give (2 Важко, 3 Добре, 4 Легко) and its score,
+-- logged also when the person grades by hand, to see how often they agree.
+alter table public.answers add column if not exists auto_guess smallint check (auto_guess between 2 and 4);
+alter table public.answers add column if not exists auto_z     real     check (auto_z between -20 and 20);
 
 -- v1.3: motivation features. Streak, pass chance and days to the exam on the session start ping.
 alter table public.pings add column if not exists streak    integer  check (streak between 0 and 10000);
@@ -160,8 +164,8 @@ begin
     raise exception 'rows must be an array of at most 200 items';
   end if;
   if t = 'answers' then
-    insert into public.answers (eid, uid, sid, qid, mode, chosen, correct, n_options, rt_ms, rating, state, stability, difficulty, reps, lapses, elapsed_days, day_n, local_hour, preset, new_per_day, retention, device, standalone, app_ver, shuffled, auto_rated)
-    select eid, uid, sid, qid, mode, chosen, correct, n_options, rt_ms, rating, state, stability, difficulty, reps, lapses, elapsed_days, day_n, local_hour, preset, new_per_day, retention, device, standalone, app_ver, shuffled, auto_rated
+    insert into public.answers (eid, uid, sid, qid, mode, chosen, correct, n_options, rt_ms, rating, state, stability, difficulty, reps, lapses, elapsed_days, day_n, local_hour, preset, new_per_day, retention, device, standalone, app_ver, shuffled, auto_rated, auto_guess, auto_z)
+    select eid, uid, sid, qid, mode, chosen, correct, n_options, rt_ms, rating, state, stability, difficulty, reps, lapses, elapsed_days, day_n, local_hour, preset, new_per_day, retention, device, standalone, app_ver, shuffled, auto_rated, auto_guess, auto_z
     from jsonb_populate_recordset(null::public.answers, rows)
     on conflict (eid) do nothing;
   elsif t = 'exams' then

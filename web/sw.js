@@ -3,7 +3,7 @@
 // view or all at once from Settings -> Offline.
 const SHELL = "pdr-shell-__BUILD__";
 const IMG = "pdr-img-v2";  // v2: descriptive file names; v1 is deleted on activate
-const FILES = ["./", "index.html", "style.css", "app.js", "ui.js", "telemetry.js", "config.js", "vendor/ts-fsrs-5.4.2.mjs", "vendor/minisearch-7.2.0.mjs",
+const FILES = ["./", "index.html", "style.css", "app.js", "ui.js", "grade.js", "telemetry.js", "config.js", "vendor/ts-fsrs-5.4.2.mjs", "vendor/minisearch-7.2.0.mjs",
                "questions.json", "manifest.webmanifest", "icon.svg", "icon-192.png", "privacy.html"];
 
 self.addEventListener("install", (e) => {

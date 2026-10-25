@@ -13,7 +13,8 @@ How "alike" is measured: each question is embedded twice:
   context = question text + all its options   -> what the question looks like
   answer  = text of the right option          -> what you have to remember
 Two questions are confusable when their contexts are close but their answers are
-not: people mix them up exactly because they look the same. Questions with a
+not: people mix them up exactly because they look the same.
+"near" lists the closest contexts whatever the answer (same point of the rules). Questions with a
 picture mostly share generic text ("Зображений дорожній знак позначає:"), so
 for them the options carry the meaning, which is why they are part of the context.
 """
@@ -39,6 +40,10 @@ BATCH = 256
 CONTEXT_MIN = 0.80   # contexts at least this close count as "looks the same" (below ~0.75: same topic only)
 ANSWER_MAX = 0.85    # and right answers less close than this count as "different"
 PER_QUESTION = 3
+# Near neighbours, any answer: questions on the same point. The app's auto-grading
+# uses how you did on them as a hint for a question you have just met.
+NEAR_MIN = 0.72
+PER_NEAR = 5
 
 
 def key_of(text):
@@ -83,8 +88,11 @@ def main():
     cs, as_ = cv @ cv.T, av @ av.T   # cosine similarity
     np.fill_diagonal(cs, -1)
 
-    out = {}
+    out, near = {}, {}
     for i, qid in enumerate(ids):
+        nb = [ids[j] for j in np.argsort(-cs[i])[:PER_NEAR] if cs[i, j] >= NEAR_MIN]
+        if nb:
+            near[qid] = nb
         picks = []
         for j in np.argsort(-cs[i]):
             if cs[i, j] < CONTEXT_MIN or len(picks) == PER_QUESTION:
@@ -97,8 +105,9 @@ def main():
 
     with open(OUT, "w", encoding="utf-8") as f:
         json.dump({"model": MODEL, "context_min": CONTEXT_MIN, "answer_max": ANSWER_MAX,
-                   "similar": out}, f, ensure_ascii=False, separators=(",", ":"))
-    print(f"{len(out)} of {len(ids)} questions have confusable neighbours -> {os.path.relpath(OUT, ROOT)}")
+                   "near_min": NEAR_MIN, "similar": out, "near": near}, f, ensure_ascii=False, separators=(",", ":"))
+    print(f"{len(out)} of {len(ids)} questions have confusable neighbours, "
+          f"{len(near)} have near ones -> {os.path.relpath(OUT, ROOT)}")
 
     # A few pairs to eyeball the thresholds.
     by_id = dict(zip(ids, qs))

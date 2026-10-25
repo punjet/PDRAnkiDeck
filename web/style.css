@@ -524,6 +524,7 @@ dialog.sheet::backdrop { background: rgba(0, 0, 0, .45); }
 .sheet-body { padding: 20px; }
 .sheet-body p { font-size: 17px; font-weight: 600; line-height: 1.4; }
 .sheet-body .actions { margin-top: 20px; }
+.sheet-body .sheet-note { margin-top: var(--s2); font-size: 15px; font-weight: 400; color: var(--muted); }
 dialog.sheet[open] { animation: sheet-in .22s var(--ease-out); }
 @keyframes sheet-in { from { opacity: 0; transform: translateY(16px) scale(.98); } }
 
@@ -558,3 +559,23 @@ html[data-vt="next"]::view-transition-new(qcard) { animation: vt-in .26s var(--e
 .no-motion *, .no-motion ::view-transition-group(*), .no-motion ::view-transition-old(*), .no-motion ::view-transition-new(*) {
   animation: none !important; transition: none !important;
 }
+
+/* ---------- 13. first-launch tour (app.js showTour) ---------- */
+dialog.tour { width: min(calc(100% - 24px), 460px); max-height: calc(100dvh - 24px); }
+.tour .sheet-body { display: grid; gap: var(--s3); padding: var(--s5) 20px 20px; }
+.tour h2 { font-size: var(--fs-lg); text-align: center; }
+.tour-emoji { font-size: 52px; line-height: 1; text-align: center; }
+.tour-dots { display: flex; justify-content: center; gap: 6px; }
+.tour-dots i { width: 8px; height: 8px; border-radius: 50%; background: var(--surface-2); transition: width .2s, background-color .2s; }
+.tour-dots i.on { width: 22px; border-radius: var(--radius-pill); background: var(--accent); }
+.tour-body { color: var(--text); font-size: 15px; line-height: 1.5; }
+.tour-body p { font-size: inherit; font-weight: 400; }
+.tour-grades { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.tour-grade {
+  display: grid; justify-items: center; padding: var(--s2) var(--s1); border: 1px solid var(--border);
+  border-radius: 12px; text-align: center; line-height: 1.25;
+}
+.tour-grade small { font-size: 11px; color: var(--muted); }
+.tour-grade.on { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+.tour-grade.on small { color: inherit; opacity: .85; }
+.tour-nav { display: flex; gap: var(--s2); margin-top: var(--s2); }

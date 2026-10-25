@@ -130,8 +130,7 @@ create table if not exists public.events (
   eid           uuid not null unique,
   uid           uuid not null,
   sid           uuid not null,
-  kind          text not null check (kind in ('share', 'install_shown', 'install_click', 'install_done',
-                  'install_later', 'ics', 'bonus', 'goal_done', 'exam_date', 'twin_open', 'search')),
+  kind          text not null check (kind in ('auto_offer', 'block_break', 'block_more', 'block_rest', 'bonus', 'exam_date', 'goal_done', 'ics', 'install_click', 'install_done', 'install_later', 'install_shown', 'search', 'share', 'tour', 'tour_pace', 'train_topic', 'transfer', 'twin_open', 'zoom')),
   detail        text check (detail ~ '^[a-z0-9_.-]{1,40}$'),   -- share: where; ics: HHMM; install_shown: prompt/ios; twin_open: id of the look-alike question; search: found/none (never the text typed)
   n             integer check (n between -1000 and 100000),   -- share: 1 sheet / 0 copied; ics: days; bonus: extra cards today; goal_done: answers; exam_date: days left
   streak        integer check (streak between 0 and 10000),
@@ -251,3 +250,18 @@ revoke all on function public.transfer_put(text, text) from public;
 revoke all on function public.transfer_get(text) from public;
 grant execute on function public.transfer_put(text, text) to anon;
 grant execute on function public.transfer_get(text) to anon;
+
+-- ---------- upgrade of tables created by an older version of this file ----------
+-- `create table if not exists` leaves an existing table as it was, so CHECK constraints that
+-- gained new values are replaced here explicitly. Safe to run again.
+alter table public.pings drop constraint if exists pings_screen_check;
+alter table public.pings add constraint pings_screen_check
+  check (screen in ('home', 'study', 'exam', 'result', 'drill', 'settings', 'search', 'topic', 'practice'));
+alter table public.answers drop constraint if exists answers_mode_check;
+alter table public.answers add constraint answers_mode_check
+  check (mode in ('study', 'exam', 'drill', 'topic'));
+alter table public.events drop constraint if exists events_kind_check;
+alter table public.events add constraint events_kind_check
+  check (kind in ('auto_offer', 'block_break', 'block_more', 'block_rest', 'bonus', 'exam_date', 'goal_done', 'ics', 'install_click', 'install_done', 'install_later', 'install_shown', 'search', 'share', 'tour', 'tour_pace', 'train_topic', 'transfer', 'twin_open', 'zoom'));
+-- Keep these lists in step with the app: one row with an unknown value makes ingest() reject
+-- the whole batch it came in. Event kinds are the first argument of ev(...) in web/app.js.

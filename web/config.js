@@ -5,4 +5,4 @@ export const SUPABASE_URL = "https://cmwvxlbxhgtzqmiaivam.supabase.co";
 export const SUPABASE_KEY = "sb_publishable_uIfP0Mwg3c076DxnFHJ9eQ_oC9f0QTD";
 // Sign-in with Google and progress sync (sync.js). Turn on once Google is set up as a
 // provider in Supabase (Authentication -> Providers) and the schema has public.progress.
-export const GOOGLE_SYNC = false;
+export const GOOGLE_SYNC = true;

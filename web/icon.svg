@@ -1,7 +1,1 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <rect width="512" height="512" rx="112" fill="#1d4ed8"/>
-  <path d="M256 104 L420 388 H92 Z" fill="#fff" stroke="#fff" stroke-width="28" stroke-linejoin="round"/>
-  <path d="M256 150 L380 366 H132 Z" fill="#c0262d"/>
-  <path d="M256 190 L345 346 H167 Z" fill="#fff"/>
-  <text x="256" y="330" font-family="Arial, Helvetica, sans-serif" font-size="120" font-weight="700" text-anchor="middle" fill="#16181d">B</text>
-</svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Здай ПДР"><title>Здай ПДР</title><rect width="256" height="256" rx="56" fill="#FFC21A"/><g transform="translate(128 128) scale(0.86) translate(-128 -128)"><path fill="#1A1D23" d="M57.21 100.79 L98 141.57 L200.79 38.79 L243.21 81.21 L119.21 205.21 A30 30 0 0 1 76.79 205.21 L14.79 143.21 Z"/></g></svg>

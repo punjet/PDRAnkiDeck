@@ -102,7 +102,9 @@ def page(*, path, title, description, body, depth, jsonld=(), og_type="article",
 <meta property="og:image" content="{esc(og_image or SITE + 'og.png')}">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="theme-color" content="#1d4ed8">
+<link rel="icon" href="{up}favicon.ico" sizes="32x32">
 <link rel="icon" href="{up}icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="{up}apple-touch-icon.png">
 <link rel="stylesheet" href="{up}style.css">
 {QUIZ_JS if quiz else ""}{scripts}</head>
 <body>
@@ -754,6 +756,8 @@ def build_static_pages(out, questions, ticket, pool, n_explained):
     <li><a href="{SITE}pdr/">Текст ПДР</a></li>
   </ul>
 </article>""")
+    html404 = html404.replace('href="favicon.ico"', f'href="{SITE}favicon.ico"').replace(
+        'href="apple-touch-icon.png"', f'href="{SITE}apple-touch-icon.png"')
     html404 = html404.replace('href="icon.svg"', f'href="{SITE}icon.svg"').replace(
         'href="style.css"', f'href="{SITE}style.css"').replace('href=""', f'href="{SITE}"')
     html404 = re.sub(r'href="(r/|pdr/|tema/|ispyt/|pro/|privacy\.html)"', lambda m: f'href="{SITE}{m.group(1)}"', html404)

@@ -1107,19 +1107,29 @@ function explainHtml(q, chosen) {
   const e = EXPLAIN[q.id];
   if (!e) return "";
   const paras = (t) => t.split(/\n+/).filter(Boolean).map((x) => `<p>${esc(x)}</p>`).join("");
-  const mine = chosen !== null && chosen !== undefined && chosen !== q.a ? e.wrong?.[chosen] : null;
+  // Same parts as on the static question pages (.xp-* in style.css): the main point big,
+  // steps as a numbered line, each wrong option on its own row, trap and "what if" as cards.
+  const text = (e.text || "").trim();
+  const cut = text.slice(0, 260).search(/(?<=[.!?])\s+(?=[А-ЯІЇЄҐA-Z«(\d])/);
+  const key = cut > 0 ? text.slice(0, cut) : text;
+  const rest = cut > 0 ? text.slice(cut).trim() : "";
+  const wrongIdx = Object.keys(e.wrong || {}).map(Number)
+    .sort((a, b) => (b === chosen) - (a === chosen) || a - b);   // the one you picked first
+  const cards = [["trap", "xp-trap", "⚠️ Пастка"], ["what_if", "xp-if", "🔄 А якщо…"], ["tip", "xp-if", "💡 Порада"]]
+    .filter(([k]) => e[k]).map(([k, cls, title]) => `<div class="xp-card ${cls}"><b>${title}</b><p>${esc(e[k])}</p></div>`).join("");
   return `
     <details class="why-box" data-explain="${esc(q.id)}" open>
       <summary>Чому так</summary>
-      <div class="stack">
-        ${paras(e.text || "")}
-        ${mine ? `<p class="tip"><b>Ваш варіант «${esc(clipText(q.o[chosen], 60))}»</b> — ${esc(mine)}</p>` : ""}
-        ${e.steps?.length ? `<ol class="steps">${e.steps.map((x) => `<li>${esc(x)}</li>`).join("")}</ol>` : ""}
-        ${e.trap ? `<p class="tip"><b>Пастка:</b> ${esc(e.trap)}</p>` : ""}
-        ${e.what_if ? `<p class="tip"><b>А якщо…</b> ${esc(e.what_if)}</p>` : ""}
-        ${e.tip ? `<p class="tip">💡 ${esc(e.tip)}</p>` : ""}
-        ${e.rules?.length ? `<p class="small">Пункти ПДР: ${e.rules.map(([k, href]) =>
-          `<a href="${esc(href)}" target="_blank" rel="noopener">${esc(k)}</a>`).join(", ")}</p>` : ""}
+      <div class="xp">
+        <p class="xp-key">${esc(key)}</p>
+        ${e.steps?.length ? `<div class="xp-steps"><h3>Як міркувати</h3><ol>${e.steps.map((x) => `<li>${esc(x)}</li>`).join("")}</ol></div>` : ""}
+        ${rest ? `<div class="xp-body">${paras(rest)}</div>` : ""}
+        ${wrongIdx.length ? `<div class="xp-wrong"><h3>Чому не інші</h3><ul>${wrongIdx.map((i) => `
+          <li${i === chosen ? ' class="xp-mine"' : ""}><span class="xp-x" aria-hidden="true">✕</span><div>
+            <b>${i === chosen ? "Ваш варіант: " : ""}${esc(clipText(q.o[i], 90))}</b><span>${esc(e.wrong[i])}</span></div></li>`).join("")}</ul></div>` : ""}
+        ${cards ? `<div class="xp-cards">${cards}</div>` : ""}
+        ${e.rules?.length ? `<div class="xp-rules"><span>Пункти ПДР:</span>${e.rules.map(([k, href]) =>
+          `<a class="xp-chip" href="${esc(href)}" target="_blank" rel="noopener">📖 ${esc(k)}</a>`).join("")}</div>` : ""}
       </div>
     </details>`;
 }

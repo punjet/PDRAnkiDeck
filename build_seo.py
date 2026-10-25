@@ -73,6 +73,7 @@ addEventListener("click", function (e) {
   if (!quiz || quiz.classList.contains("done")) return;
   quiz.classList.add("done");
   if (b.dataset.opt !== undefined && b.dataset.opt !== quiz.dataset.a) b.classList.add("wrong");
+  quiz.dataset.res = b.dataset.opt === undefined ? "shown" : b.dataset.opt === quiz.dataset.a ? "right" : "wrong";
 });
 </script>
 """
@@ -240,24 +241,16 @@ def build(out, questions, sections, ticket):
                 f'{"<span class=mark> ✓</span>" if j == q["a"] else ""}</span></button></li>'
                 for j, o in enumerate(q["o"]))
             share = 100 * ticket[q["block"]] / pool[q["block"]]
-            chance = (f'<p class="small muted">Шанс, що це питання трапиться у вашому білеті, — приблизно '
-                      f'<b>1 з {round(100 / share)}</b>.</p>')
+            chance = (f'<span class="xp-meta-i" title="Шанс, що це питання трапиться у вашому білеті">'
+                      f'🎯 1 з {round(100 / share)} у білеті</span>')
 
-            reveal = f'<p class="verdict ok">Правильна відповідь: {q["a"] + 1}. {esc(right)}</p>'
             rules_box = ""
             if e:
-                wrong = "".join(f'<li><b>{int(k)}. {esc(q["o"][int(k) - 1])}</b> — {esc(v)}</li>'
-                                for k, v in sorted(e["wrong"].items(), key=lambda x: int(x[0])))
-                steps = "".join(f"<li>{esc(s)}</li>" for s in e.get("steps", []))
-                reveal += f"""<div class="expl stack">
-    <h2>Пояснення</h2>
-    {f'<h3>Як міркувати</h3><ol class="steps">{steps}</ol>' if steps else ""}
-    {paras(e["text"])}
-    {f'<h3>Чому інші варіанти неправильні</h3><ul class="why">{wrong}</ul>' if wrong else ""}
-    {f'<p class="tip"><b>Пастка:</b> {esc(e["trap"])}</p>' if e.get("trap") else ""}
-    {f'<p class="tip"><b>А якщо…</b> {esc(e["what_if"])}</p>' if e.get("what_if") else ""}
-    {f'<p class="tip">💡 {esc(e["tip"])}</p>' if e.get("tip") else ""}
-  </div>"""
+                reveal = explain_block(q, e, up, rule_href)
+            else:
+                reveal = (f'<div class="xp-answer"><span class="xp-check" aria-hidden="true">✓</span>'
+                          f'<div><small>Правильна відповідь</small><b>{q["a"] + 1}. {esc(right)}</b></div></div>')
+            if e:
                 items = []
                 for k in e["rules"]:
                     txt = RULES[k]
@@ -281,9 +274,8 @@ def build(out, questions, sections, ticket):
   <ol class="seclist">{rows}</ol>
 </section>"""
             tl = q_topics.get(q["id"], [])
-            topic_line = ('<p class="small muted">Тема: ' + ", ".join(
-                f'<a href="{up}{p_}">{esc(nm)}</a>' for nm, p_ in tl) + "</p>") if tl else ""
-            updated = (f'<p class="small muted">Пояснення оновлено {ua_date(e["at"])}.</p>'
+            topic_line = "".join(f'<a class="xp-meta-i" href="{up}{p_}">🏷 {esc(nm)}</a>' for nm, p_ in tl)
+            updated = (f'<span class="xp-meta-i" title="Пояснення оновлено">🕒 {ua_date(e["at"])}</span>'
                        if e and e.get("at") else "")
             nav = []
             if i > 0:
@@ -302,9 +294,7 @@ def build(out, questions, sections, ticket):
   <ol class="opts static-opts">{opts}</ol>
   <button type="button" class="ghost show" data-show>Показати відповідь</button>
   <div class="reveal stack">{reveal}</div>
-  {chance}
-  {topic_line}
-  {updated}
+  <div class="xp-meta">{chance}{topic_line}{updated}</div>
   {report_link(q, path)}
 </article>
 {rules_box}
@@ -550,6 +540,45 @@ def q_row(up, q, note=""):
     sub = f"<small>{note}</small>" if note else ""
     return (f'<li><a class="sec" href="{up}q/{q["id"]}/"><span class="sec-no" aria-label="Розділ {esc(q["section"])}">'
             f'{esc(q["section"])}</span><span class="sec-name">{esc(clip(q["t"], 140))}{sub}</span></a></li>')
+
+
+def split_key(text):
+    """First sentence (the main point, shown big) and the rest of the explanation."""
+    text = text.strip()
+    m = re.search(r"(?<=[.!?])\s+(?=[А-ЯІЇЄҐA-Z«(\d])", text)
+    if not m or m.start() > 260:
+        return text, ""
+    return text[:m.start()], text[m.end():]
+
+
+def explain_block(q, e, up, rule_href):
+    """The explanation as distinct parts instead of one wall of text."""
+    right = q["o"][q["a"]]
+    key, rest = split_key(e["text"])
+    steps = "".join(f"<li>{esc(x)}</li>" for x in e.get("steps", []))
+    wrong = "".join(
+        f'<li><span class="xp-x" aria-hidden="true">✕</span><div><b>{int(k)}. {esc(clip(q["o"][int(k) - 1], 90))}</b>'
+        f'<span>{esc(v)}</span></div></li>'
+        for k, v in sorted(e["wrong"].items(), key=lambda x: int(x[0])))
+    cards = "".join(
+        f'<div class="xp-card xp-{cls}"><b>{icon} {title}</b><p>{esc(e[k])}</p></div>'
+        for k, cls, icon, title in (("trap", "trap", "⚠️", "Пастка"), ("what_if", "if", "🔄", "А якщо…"),
+                                    ("tip", "if", "💡", "Порада")) if e.get(k))
+    chips = "".join(f'<a class="xp-chip" href="{rule_href(up, k)}">📖 {k}</a>' for k in e.get("rules", []))
+    return f"""<div class="xp-verdict" aria-live="polite">
+    <span class="xp-v-right">✅ Правильно!</span><span class="xp-v-wrong">❌ Не зовсім.</span>
+  </div>
+  <div class="xp-answer"><span class="xp-check" aria-hidden="true">✓</span>
+    <div><small>Правильна відповідь</small><b>{q["a"] + 1}. {esc(right)}</b></div></div>
+  <div class="xp">
+    <h2 class="xp-h">Пояснення</h2>
+    <p class="xp-key">{esc(key)}</p>
+    {f'<div class="xp-steps"><h3>Як міркувати</h3><ol>{steps}</ol></div>' if steps else ""}
+    {f'<div class="xp-body">{paras(rest)}</div>' if rest else ""}
+    {f'<div class="xp-wrong"><h3>Чому не інші</h3><ul>{wrong}</ul></div>' if wrong else ""}
+    {f'<div class="xp-cards">{cards}</div>' if cards else ""}
+    {f'<div class="xp-rules"><span>Пункти ПДР:</span>{chips}</div>' if chips else ""}
+  </div>"""
 
 
 def report_link(q, path):

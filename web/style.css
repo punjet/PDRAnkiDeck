@@ -657,3 +657,73 @@ dialog.viewer.zoomed .viewer-hint { opacity: 0; }
 /* ---------- 16. transfer to another device ---------- */
 .qr-box { display: grid; place-items: center; }
 .qr-box .qr { width: min(240px, 70vw); height: auto; border-radius: 12px; background: #fff; }
+
+/* ---------- explanation block (static question pages; the app reuses .xp-*) ---------- */
+.xp-verdict { display: none; font-size: var(--fs-md); font-weight: 800; }
+.xp-verdict span { display: none; }
+.quiz[data-res="right"] .xp-verdict, .quiz[data-res="wrong"] .xp-verdict { display: block; }
+.quiz[data-res="right"] .xp-v-right, .quiz[data-res="wrong"] .xp-v-wrong { display: inline; }
+.xp-v-right { color: var(--ok); }
+.xp-v-wrong { color: var(--bad); }
+.xp-answer {
+  display: flex; gap: var(--s3); align-items: flex-start;
+  background: var(--ok-soft); border-radius: var(--radius-sm); padding: var(--s3);
+}
+.xp-answer small { display: block; color: var(--ok); font-weight: 700; font-size: var(--fs-xs);
+  text-transform: uppercase; letter-spacing: .04em; }
+.xp-check { flex: 0 0 28px; height: 28px; border-radius: 50%; background: var(--ok); color: var(--on-color);
+  display: inline-flex; align-items: center; justify-content: center; font-weight: 800; }
+.xp { display: grid; gap: var(--s4); margin-top: var(--s2); }
+.xp h3 { font-size: var(--fs-sm); text-transform: uppercase; letter-spacing: .05em; color: var(--muted);
+  margin-bottom: var(--s2); }
+.xp-h { font-size: var(--fs-md); }
+.xp-key {
+  font-size: var(--fs-md); font-weight: 650; line-height: 1.45;
+  border-left: 4px solid var(--accent); padding: var(--s1) 0 var(--s1) var(--s3);
+}
+/* steps: numbered circles joined by a line */
+.xp-steps ol { list-style: none; margin: 0; padding: 0; counter-reset: xp; }
+.xp-steps li { position: relative; padding: 0 0 var(--s3) 40px; counter-increment: xp; }
+.xp-steps li::before {
+  content: counter(xp); position: absolute; left: 0; top: 0; width: 26px; height: 26px; border-radius: 50%;
+  background: var(--accent); color: var(--accent-text); font-weight: 800; font-size: var(--fs-sm);
+  display: flex; align-items: center; justify-content: center;
+}
+.xp-steps li:not(:last-child)::after {
+  content: ""; position: absolute; left: 12px; top: 28px; bottom: 2px; width: 2px; background: var(--accent-soft);
+}
+.xp-steps li:last-child { padding-bottom: 0; }
+.xp-body p + p { margin-top: var(--s2); }
+.xp-body { color: var(--text); }
+/* wrong options: one row each */
+.xp-wrong ul { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--s2); }
+.xp-wrong li { display: flex; gap: var(--s3); align-items: flex-start; background: var(--surface-2);
+  border-radius: var(--radius-sm); padding: var(--s3); }
+.xp-wrong li b { display: block; font-size: var(--fs-sm); }
+.xp-wrong li span:not(.xp-x) { display: block; color: var(--muted); font-size: var(--fs-sm); margin-top: 2px; }
+.xp-x { flex: 0 0 24px; height: 24px; border-radius: 50%; background: var(--bad-soft); color: var(--bad);
+  display: inline-flex; align-items: center; justify-content: center; font-weight: 800; font-size: var(--fs-sm); }
+/* trap / what if: two cards side by side on wide screens */
+.xp-cards { display: grid; gap: var(--s3); }
+@media (min-width: 600px) { .xp-cards { grid-template-columns: 1fr 1fr; } }
+.xp-card { border-radius: var(--radius-sm); padding: var(--s3); }
+.xp-card b { display: block; margin-bottom: var(--s1); }
+.xp-trap { background: var(--warn-soft); }
+.xp-trap b { color: var(--warn); }
+.xp-if { background: var(--accent-soft); }
+.xp-if b { color: var(--accent); }
+/* rules and meta as chips */
+.xp-rules, .xp-meta { display: flex; flex-wrap: wrap; gap: var(--s2); align-items: center; }
+.xp-rules > span { font-size: var(--fs-sm); color: var(--muted); }
+.xp-chip, .xp-meta-i {
+  display: inline-flex; align-items: center; gap: 4px; min-height: 32px; padding: 4px 10px;
+  border-radius: var(--radius-pill); background: var(--surface-2); color: var(--text);
+  font-size: var(--fs-sm); font-weight: 600; text-decoration: none;
+}
+.xp-chip { color: var(--accent); background: var(--accent-soft); }
+.xp-meta { margin-top: var(--s2); }
+a.xp-meta-i { color: var(--accent); }
+.xp-wrong li.xp-mine { background: var(--bad-soft); }
+.why-box .xp { margin-top: 0; }
+.why-box .xp-wrong li { background: var(--surface); }
+.why-box .xp-wrong li.xp-mine { background: var(--bad-soft); }

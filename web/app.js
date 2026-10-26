@@ -1912,7 +1912,7 @@ function browseHtml(open = false) {
   }
   return groups.map((g, i) => `
       <details class="group" ${open && i === 0 ? "open" : ""}>
-        <summary>${esc(g.name)} <span class="muted small group-sub">${g.topics.length} ${plural(g.topics.length, "тема", "теми", "тем")}${
+        <summary><span>${esc(g.name)}</span><span class="muted small group-sub">${g.topics.length} ${plural(g.topics.length, "тема", "теми", "тем")}${
           g.known ? ` · вивчено ${Math.round(100 * g.known / g.total)}%` : ""}</span></summary>
         <ol class="seclist">${g.topics.map(topicRow).join("")}</ol>
       </details>`).join("");

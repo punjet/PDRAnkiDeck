@@ -486,7 +486,7 @@ details.tiers summary::after { margin-left: var(--s1); padding: 0; color: inheri
 
 details.group { background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); margin-top: 10px; }
 details.group summary { padding: 14px var(--s4); font-weight: 600; display: flex; gap: var(--s2); align-items: center; }
-#results details.group .seclist { margin: 0; padding: 0 var(--s3) var(--s1); border-top: 1px solid var(--border); background: none; box-shadow: none; border-radius: 0; }
+details.group .seclist { margin: 0; padding: 0 var(--s3) var(--s1); border-top: 1px solid var(--border); background: none; box-shadow: none; border-radius: 0; }
 details.group .seclist li:last-child { border-bottom: 0; }
 .topic-h { font-size: var(--fs-lg); }
 
@@ -779,7 +779,10 @@ details.xp-more > summary { font-weight: 600; color: var(--accent); min-height: 
 details.xp-more[open] > summary { margin-bottom: var(--s2); }
 .legend i.bad { background: var(--bad); } .legend i.warn { background: var(--warn); } .legend i.ok { background: var(--ok); }
 .st-legend { margin: var(--s3) 0 0; }
-.group-sub { margin-left: auto; font-weight: 400; }
+/* Group name on the left, its count right next to the arrow, on one line. */
+details.group summary > :first-child { flex: 1; }
+.group-sub { margin-left: auto; font-weight: 400; white-space: nowrap; }
+details.group summary::after { margin-left: 0; }
 .img-missing { margin: var(--s3) 0; padding: var(--s3); border-radius: var(--radius-sm); background: var(--surface-2); text-align: center; }
 .loading.stack { justify-items: center; }
 .stack > .search-bar { margin-bottom: 0; }

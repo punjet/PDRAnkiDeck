@@ -10,7 +10,7 @@ import * as grader from "./grade.js";
 import { esc, plural, clipText, shuffle, ICON, topBar, dock, emptyState, announce, toast,
   confetti as confettiRaw, ask, openImage } from "./ui.js";
 
-const APP_VER = "1.4";
+const APP_VER = "1.5";
 const STORE_KEY = "pdr-b-v1";
 const IMG_CACHE = "pdr-img-v2";
 const DAY_START_HOUR = 4;          // Anki's default "next day starts at"
@@ -52,7 +52,8 @@ function defaultState() {
     // is graded by grade.js and the next question comes by itself; autoAsked: auto was
     // offered after the first manual grades (it starts off); motion: animations.
     // blocks: study in ~15-minute sets with a break screen in between.
-    prefs: { shuffle: true, auto: false, autoAsked: false, motion: true, blocks: true },
+    // theme: "system" follows the phone's light / dark setting; "light" / "dark" fix it.
+    prefs: { shuffle: true, auto: false, autoAsked: false, motion: true, blocks: true, theme: "system" },
     grade: null,      // grade.js model: this person's pace and how they grade by hand
     wrong: {},        // id -> unix ms of the last wrong answer (study or exam)
     exams: [],        // {at, errors, total, passed}
@@ -622,6 +623,14 @@ function barSpan(key, pct, cls = "", style = "") {
 
 const motionOn = () => S.prefs.motion && !matchMedia("(prefers-reduced-motion: reduce)").matches;
 const applyMotion = () => document.documentElement.classList.toggle("no-motion", !S.prefs.motion);
+// The choice is also kept under its own key: index.html reads it before the page
+// paints, so a picked theme does not flash the system one first.
+function applyTheme() {
+  const t = S.prefs.theme;
+  if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+  else delete document.documentElement.dataset.theme;
+  try { localStorage.setItem("pdr-theme", t || "system"); } catch (e) { /* storage blocked */ }
+}
 const confetti = () => { if (motionOn()) confettiRaw(); };
 
 // Screen changes cross-fade; the next question slides in (View Transitions, where supported).
@@ -640,7 +649,30 @@ function go(v) {
   view = v;
   focusNext = true;
   vt(render);
+  syncHistory();
 }
+
+// ---- system back button ----
+// Off the home screen one history entry of ours sits over the home one, so the phone's
+// back gesture or the browser's back button means "back" inside the app, not "leave the
+// site". It closes an open dialog first, else presses the screen's own back / exit
+// button (the exam asks before quitting, as with the ✕). Back home by an app button,
+// the entry is taken off again, so on the home screen one back press leaves as usual.
+let histArmed = false, histSkip = false;
+function syncHistory() {
+  const want = view.name !== "home";
+  if (want && !histArmed) { history.pushState({ pdr: 1 }, ""); histArmed = true; }
+  else if (!want && histArmed) { histArmed = false; histSkip = true; history.back(); }
+}
+addEventListener("popstate", () => {
+  if (histSkip) { histSkip = false; return; }
+  histArmed = false;
+  if (!DB || view.name === "home") return;
+  syncHistory();   // stay armed: the back action below may be cancelled
+  const dlg = document.querySelector("dialog[open]");
+  if (dlg) { dlg.close(""); return; }
+  app.querySelector(".top .nav-btn")?.click();
+});
 
 // ---- auto-advance after a right answer ----
 const AUTO_MS = 2500;   // long enough to read the verdict and the grade picked
@@ -766,6 +798,7 @@ function showTour(from = "start") {
     const sl = slides[i], last = i === slides.length - 1;
     d.innerHTML = `<div class="sheet-body">
       <div class="tour-dots" aria-hidden="true">${slides.map((_, k) => `<i class="${k === i ? "on" : ""}"></i>`).join("")}</div>
+      <p class="sr-only">Крок ${i + 1} з ${slides.length}</p>
       <div class="tour-emoji" aria-hidden="true">${sl.emoji}</div>
       <h2 tabindex="-1">${sl.title}</h2>
       <div class="tour-body stack">${sl.body}</div>
@@ -773,7 +806,7 @@ function showTour(from = "start") {
         <button class="primary block" data-tour="next" ${picked ? "" : "disabled"}>${from === "start" ? "Почати навчання" : "Зберегти"}</button>
         <button class="ghost block" data-tour="nodate">Не буду вказувати</button>
       </div>` : `<div class="tour-nav">
-        <button class="ghost" data-tour="skip">Пропустити</button>
+        <button class="ghost" data-tour="skip">До вибору темпу</button>
         <button class="primary grow" data-tour="next">Далі</button>
       </div>`}</div>`;
     d.querySelector("h2").focus({ preventScroll: true });
@@ -789,9 +822,11 @@ function showTour(from = "start") {
       markPace();
       return;
     }
-    // Skipped questions keep the default pace (2 weeks) and no date.
+    // Skipping the explanations still lands on the pace card: the default pace
+    // (2 weeks, ~2 h a day) is too much for someone whose exam is a month away.
+    // "Не буду вказувати" there keeps the default pace and no date.
     if (b.dataset.tour === "nodate") return d.close("nodate");
-    if (b.dataset.tour === "skip") return d.close("skip");
+    if (b.dataset.tour === "skip") { ev("tour_skip", null, i + 1); i = slides.length - 1; draw(); return; }
     if (b.dataset.tour === "next") {
       if (i === slides.length - 1) return d.close("done");
       i++; draw();
@@ -908,12 +943,14 @@ const about = document.getElementById("about");
 
 function render() {
   // The static SEO text under the app belongs to the home screen only.
-  const home = view.name === "home";
+  // People already studying see it every day, so it goes once they have 20 answers.
+  const home = view.name === "home" && S.logs.length < 20;
   if (about) about.hidden = !home;
   app.classList.toggle("with-about", home && !!about);
   ({ home: renderHome, study: renderStudy, exam: renderExam, result: renderResult,
      drill: renderDrill, settings: renderSettings,
-     search: renderSearch, topic: renderTopic, practice: renderPractice })[view.name]();
+     search: renderSearch, topics: renderTopics, topic: renderTopic, practice: renderPractice,
+     question: renderQuestion })[view.name]();
 }
 
 function tierStats() {
@@ -989,7 +1026,6 @@ function renderHome() {
       aria-label="${streak.n} ${plural(streak.n, "день", "дні", "днів")} поспіль">🔥 ${streak.n}</span>` : ""}
     <button class="icon-btn" data-go="settings" aria-label="Налаштування" title="Налаштування">${ICON.gear}</button>
   </header>
-  <button class="search-bar" data-go="search">${ICON.search} Пошук питань і тем</button>
   <div class="stack">
     ${outcomeHtml()}
     <section class="card hero">
@@ -1024,7 +1060,12 @@ function renderHome() {
         <span class="tile-sub">${wrongCount ? "Повторити" : "Поки немає"}</span>
         <span class="tile-num ${wrongCount ? "t-bad" : ""}">${wrongCount}</span>
       </button>
+      ${DB.topics?.length ? `<button class="tile wide" data-go="topics">
+        <span class="tile-title">Теми</span>
+        <span class="tile-sub">${DB.topics.length} тем — тренуйте вибірково: перехрестя, знаки, домедична допомога…</span>
+      </button>` : ""}
     </div>
+    <button class="search-bar" data-go="search">${ICON.search} Пошук питань і тем</button>
 
     ${weakTopicsHtml()}
 
@@ -1042,7 +1083,7 @@ function renderHome() {
         <span><i></i>${total - known - learning} нових</span>
       </div>
       <details class="tiers">
-        <summary>За темами</summary>
+        <summary>За розділами білета</summary>
         ${tiers.map((t) => `
           <div class="tier">
             <div class="row spread"><span class="name">${esc(t.name)}</span>
@@ -1115,23 +1156,29 @@ function explainHtml(q, chosen) {
   const cut = text.slice(0, 260).search(/(?<=[.!?])\s+(?=[А-ЯІЇЄҐA-Z«(\d])/);
   const key = cut > 0 ? text.slice(0, cut) : text;
   const rest = cut > 0 ? text.slice(cut).trim() : "";
-  const wrongIdx = Object.keys(e.wrong || {}).map(Number)
-    .sort((a, b) => (b === chosen) - (a === chosen) || a - b);   // the one you picked first
+  // Progressive disclosure: the main point and why your pick is wrong come at once;
+  // the reasoning steps, the other options, the trap and the rules wait behind
+  // "Детальніше", so a mistake is not followed by a wall of text every time.
+  const others = Object.keys(e.wrong || {}).map(Number).filter((i) => i !== chosen).sort((a, b) => a - b);
+  const wrongLi = (i) => `
+          <li${i === chosen ? ' class="xp-mine"' : ""}><span class="xp-x" aria-hidden="true">✕</span><div>
+            <b>${i === chosen ? "Ваш варіант: " : ""}${esc(clipText(q.o[i], 90))}</b><span>${esc(e.wrong[i])}</span></div></li>`;
   const cards = [["trap", "xp-trap", "⚠️ Пастка"], ["what_if", "xp-if", "🔄 А якщо…"], ["tip", "xp-if", "💡 Порада"]]
     .filter(([k]) => e[k]).map(([k, cls, title]) => `<div class="xp-card ${cls}"><b>${title}</b><p>${esc(e[k])}</p></div>`).join("");
+  const more = `
+        ${e.steps?.length ? `<div class="xp-steps"><h3>Як міркувати</h3><ol>${e.steps.map((x) => `<li>${esc(x)}</li>`).join("")}</ol></div>` : ""}
+        ${rest ? `<div class="xp-body">${paras(rest)}</div>` : ""}
+        ${others.length ? `<div class="xp-wrong"><h3>${chosen !== null && e.wrong?.[chosen] ? "Чому не інші" : "Чому не ці варіанти"}</h3><ul>${others.map(wrongLi).join("")}</ul></div>` : ""}
+        ${cards ? `<div class="xp-cards">${cards}</div>` : ""}
+        ${e.rules?.length ? `<div class="xp-rules"><span>Пункти ПДР:</span>${e.rules.map(([k, href]) =>
+          `<a class="xp-chip" href="${esc(href)}" target="_blank" rel="noopener">📖 ${esc(k)}</a>`).join("")}</div>` : ""}`;
   return `
     <details class="why-box" data-explain="${esc(q.id)}" open>
       <summary>Чому так</summary>
       <div class="xp">
         <p class="xp-key">${esc(key)}</p>
-        ${e.steps?.length ? `<div class="xp-steps"><h3>Як міркувати</h3><ol>${e.steps.map((x) => `<li>${esc(x)}</li>`).join("")}</ol></div>` : ""}
-        ${rest ? `<div class="xp-body">${paras(rest)}</div>` : ""}
-        ${wrongIdx.length ? `<div class="xp-wrong"><h3>Чому не інші</h3><ul>${wrongIdx.map((i) => `
-          <li${i === chosen ? ' class="xp-mine"' : ""}><span class="xp-x" aria-hidden="true">✕</span><div>
-            <b>${i === chosen ? "Ваш варіант: " : ""}${esc(clipText(q.o[i], 90))}</b><span>${esc(e.wrong[i])}</span></div></li>`).join("")}</ul></div>` : ""}
-        ${cards ? `<div class="xp-cards">${cards}</div>` : ""}
-        ${e.rules?.length ? `<div class="xp-rules"><span>Пункти ПДР:</span>${e.rules.map(([k, href]) =>
-          `<a class="xp-chip" href="${esc(href)}" target="_blank" rel="noopener">📖 ${esc(k)}</a>`).join("")}</div>` : ""}
+        ${chosen !== null && e.wrong?.[chosen] ? `<div class="xp-wrong"><ul>${wrongLi(chosen)}</ul></div>` : ""}
+        ${more.trim() ? `<details class="xp-more"><summary>Детальніше</summary>${more}</details>` : ""}
       </div>
     </details>`;
 }
@@ -1259,7 +1306,8 @@ function renderStudyDone(soon) {
       </div>` : ""}
       ${chanceShown(chance) ? readyHtml(chance) : ""}`,
     actions: `
-      ${soon ? `<button class="primary block" data-act="study-now">Показати зараз</button>` : ""}
+      ${soon ? `<button class="primary block" data-act="study-now">Показати зараз</button>
+        <p class="small muted">Раніше строку — повторення спрацює слабше. Краще пройти іспит чи помилки.</p>` : ""}
       <button class="${soon ? "" : "primary"} block" data-go="exam">Пробний іспит</button>
       ${unseen ? `<button class="block" data-act="bonus">Ще 20 нових питань</button>` : ""}
       ${!soon && !S.plan.remindAt ? `<button class="block" data-act="remind" data-at="${at}">📅 Нагадувати щодня о ${at}</button>` : ""}
@@ -1278,11 +1326,64 @@ function newExam() {
            endsAt: Date.now() + EXAM_MINUTES * 60e3 };
 }
 
+// The attempt in progress is kept apart from the progress, so a reload, an app the
+// phone unloaded or a closed tab does not lose it. Cleared when it ends either way.
+const EXAM_KEY = "pdr-b-exam";
+function saveExam(ex) {
+  try { localStorage.setItem(EXAM_KEY, JSON.stringify(ex)); } catch (e) { /* storage blocked */ }
+}
+function clearExam() {
+  try { localStorage.removeItem(EXAM_KEY); } catch (e) { /* storage blocked */ }
+}
+// A saved attempt that is still on, or ran out less than an hour ago (then it counts
+// as "time ran out"). Older ones and ones with questions no longer in the base go.
+function loadExam() {
+  let ex = null;
+  try { ex = JSON.parse(localStorage.getItem(EXAM_KEY)); } catch (e) { /* none */ }
+  if (!ex || !Array.isArray(ex.ids) || !ex.ids.every((id) => byId[id]) || Date.now() - ex.endsAt > 3600e3) {
+    clearExam(); return null;
+  }
+  ex.shownAt = activeNow();
+  return ex;
+}
+
+const BLOCK_LABEL = { pdr: "Правила дорожнього руху", safety: "Основи безпечного водіння",
+  category: "Додаткові питання категорії B", firstaid: "Домедична допомога" };
+
+// Before the timer starts: what the ticket holds and the rules, so the first attempt
+// is not a surprise.
+function renderExamIntro() {
+  h(`
+  ${topBar({ title: "Пробний іспит" })}
+  <section class="card stack">
+    <h2 tabindex="-1">Як у сервісному центрі</h2>
+    <ul class="exam-rules">
+      <li><b>${EXAM_MINUTES} питань</b>, <b>${EXAM_MINUTES} хвилин</b>. Таймер стартує після «Почати».</li>
+      <li>Не більше <b>${EXAM_MAX_ERRORS} помилок</b>: третя означає, що іспит не складено.</li>
+      <li>Відповідь одразу позначається правильною чи ні. Питання можна пропустити й повернутися до нього за номером.</li>
+    </ul>
+    <h3 class="small muted">У білеті</h3>
+    <ul class="exam-blocks">${DB.ticket.map(({ block, count }) =>
+      `<li><span>${esc(BLOCK_LABEL[block] || block)}</span><b>${count}</b></li>`).join("")}</ul>
+  </section>
+  ${dock(`<button class="primary block big" data-act="exam-start">Почати іспит</button>`)}`);
+}
+
+function startExam() {
+  view.exam = newExam();
+  saveExam(view.exam);
+  vt(renderExam, "next");
+}
+
 // Works like the HSC exam (hsc.gov.ua, 12.02.2026): each answer is marked right or
 // wrong at once, the number strip turns green/red, and a question can be skipped
 // and answered later while time remains.
 function renderExam() {
-  if (!view.exam) view.exam = newExam();
+  if (!view.exam) {
+    if (!view.start) return renderExamIntro();
+    view.exam = newExam();
+    saveExam(view.exam);
+  }
   const ex = view.exam;
   if (Date.now() >= ex.endsAt) return finishExam(true);
   const q = byId[ex.ids[ex.i]];
@@ -1300,11 +1401,18 @@ function renderExam() {
   else if (answered) action = `<button class="primary block big" data-act="exam-next">Далі</button>`;
   else action = `<button class="block" data-act="exam-next" ${left > 1 ? "" : "disabled"}>Пропустити</button>`;
   const errCls = errors > EXAM_MAX_ERRORS ? "t-bad" : errors ? "t-warn" : "";
+  // Past the limit the attempt is lost; say so, and offer the review instead of
+  // making the person answer the rest for nothing (they still can).
+  const failed = errors > EXAM_MAX_ERRORS && left
+    ? `<div class="exam-failed" role="status"><p><b>Іспит уже не складено</b> — ${errors} ${plural(errors, "помилка", "помилки", "помилок")}.
+        Можна відповідати далі для тренування.</p>
+        <button class="block" data-act="exam-finish">Завершити й розібрати помилки</button></div>` : "";
   h(`
   ${topBar({ back: 'data-act="exam-quit"', close: true, title: `Питання ${ex.i + 1} з ${ex.ids.length}`,
     sub: `<span class="${errCls}">${errors} ${plural(errors, "помилка", "помилки", "помилок")}</span> з ${EXAM_MAX_ERRORS} допустимих`,
     right: `<span class="timer" id="timer" role="timer" aria-label="Залишилось часу"></span>` })}
   <div class="dots">${dots}</div>
+  ${failed}
   ${quizCard(q, { chosen, perm: ex.perms?.[ex.i], anim: ex.anim === ex.i })}
   ${dock(action)}`);
   if (answered) app.querySelector(".opt.right")?.scrollIntoView({ block: "center" });
@@ -1316,6 +1424,7 @@ function examGoto(i) {
   const ex = view.exam;
   ex.i = i;
   ex.shownAt = activeNow();
+  saveExam(ex);
   if (timerHandle) { clearInterval(timerHandle); timerHandle = null; }
   vt(renderExam, "next");
 }
@@ -1336,6 +1445,13 @@ function tick() {
     const m = Math.floor(left / 60e3), s = Math.floor(left / 1000) % 60;
     el.textContent = `${m}:${String(s).padStart(2, "0")}`;
     el.classList.toggle("low", left < 3 * 60e3);
+    // The timer itself is silent for screen readers (it changes every second);
+    // two points are said aloud instead.
+    const mark = left <= 60e3 ? 1 : left <= 5 * 60e3 ? 5 : 0;
+    if (mark && ex.said !== mark) {
+      ex.said = mark;
+      announce(mark === 1 ? "Залишилась 1 хвилина" : "Залишилось 5 хвилин");
+    }
   }
   if (left <= 0) finishExam(true);
 }
@@ -1346,6 +1462,7 @@ function finishExam(timeout = false) {
   const errors = ex.ids.reduce((n, id, i) => n + (ex.answers[i] !== byId[id].a ? 1 : 0), 0);
   ex.ids.forEach((id, i) => { if (ex.answers[i] !== byId[id].a) S.wrong[id] = Date.now(); });
   const rec = { at: Date.now(), errors, total: ex.ids.length, passed: errors <= EXAM_MAX_ERRORS, timeout };
+  clearExam();
   S.exams.push(rec);
   save();
   tele.track("exams", {
@@ -1421,12 +1538,18 @@ function renderResult() {
     <h2 tabindex="-1">${rec.passed ? "Іспит складено" : "Іспит не складено"}</h2>
     <p class="muted">${rec.errors} ${plural(rec.errors, "помилка", "помилки", "помилок")}${rec.timeout ? " · час вичерпано" : ""}.
       Допускається не більше ${EXAM_MAX_ERRORS}.</p>
-    <div class="actions two">
-      <button class="primary" data-go="exam">Ще один іспит</button>
+    ${rec.passed ? `<div class="actions two">
+      <button class="primary" data-act="exam-start">Ще один іспит</button>
       <button data-go="home">На головну</button>
     </div>
-    ${rec.passed ? `<button class="ghost block" data-act="share" data-where="exam"
-      data-text="Склав(ла) пробний іспит ПДР на ${rec.total - rec.errors}/${rec.total} 🚗 Готуюся безкоштовно тут:">Поділитися результатом</button>` : ""}
+    <button class="ghost block" data-act="share" data-where="exam"
+      data-text="Пробний іспит ПДР: ${rec.total - rec.errors}/${rec.total} — складено 🚗 Готуюся безкоштовно тут:">Поділитися результатом</button>`
+    // After a failed attempt the next step is the mistakes, not another ticket.
+    : `<button class="primary block" data-go="drill">Тренувати помилки</button>
+    <div class="actions two">
+      <button data-act="exam-start">Ще один іспит</button>
+      <button data-go="home">На головну</button>
+    </div>`}
   </section>
   ${examChartHtml()}
   ${wrong.length ? `<h2 class="section-h">Розбір помилок <span class="muted">${wrong.length}</span></h2>
@@ -1448,14 +1571,22 @@ function renderDrill() {
   if (!view.queue) {
     view.queue = Object.entries(S.wrong).sort((a, b) => b[1] - a[1]).map(([id]) => id)
       .filter((id) => byId[id]);
+    view.total = view.queue.length;
+    view.fixed = 0;
+    view.tries = 0;
   }
   const id = view.queue[0];
   if (!id) {
+    const extra = view.tries - view.total;   // answers it took beyond one per question
     h(`
     ${topBar({ title: "Помилки" })}
     ${emptyState({ emoji: "🎉", title: "Помилок не лишилося",
-      text: "Кожне питання з помилкою ви тепер відповіли правильно.",
-      actions: `<button class="primary block" data-go="home">На головну</button>` })}`);
+      text: view.total
+        ? `Виправлено ${view.total} ${plural(view.total, "питання", "питання", "питань")}${extra > 0
+          ? `, ще ${extra} ${plural(extra, "раз", "рази", "разів")} довелося повторити` : " з першої спроби"}.`
+        : "Кожне питання з помилкою ви тепер відповіли правильно.",
+      actions: `<button class="primary block" data-go="home">На головну</button>
+        <button class="block" data-go="exam">Пробний іспит</button>` })}`);
     return;
   }
   const q = byId[id];
@@ -1464,7 +1595,8 @@ function renderDrill() {
   const answered = st.chosen !== null;
   const auto = answered && st.chosen === q.a && st.auto;
   h(`
-  ${topBar({ title: "Робота над помилками", sub: `лишилось ${view.queue.length}` })}
+  ${topBar({ title: "Робота над помилками", sub: `виправлено ${view.fixed} з ${view.total}` })}
+  <div class="bar thin">${barSpan("drill", Math.round(100 * view.fixed / Math.max(1, view.total)), "b-known")}</div>
   ${quizCard(q, { chosen: st.chosen, perm: st.perm, anim: st.anim,
     right: ` Питання прибрано зі списку.${comboHtml()}`, wrong: " Питання повториться.", extra: () => explainHtml(q, st.chosen) + twinsHtml(q) })}
   ${dock(answered ? `<button class="primary block big ${auto ? "auto" : ""}" style="--auto:${AUTO_MS}ms" data-act="drill-next">Далі</button>` : "")}`);
@@ -1486,17 +1618,30 @@ function paceNote(s = S.settings) {
 }
 
 // Every field saves on change; there is no "Save" button to forget.
+// Order: what people change most and what keeps their work safe first (account,
+// exam date and pace), then how study feels, then data tools, and the one
+// irreversible action alone at the very bottom.
 function renderSettings() {
   const s = S.settings;
   const custom = s.preset === "custom";
+  const left = examDaysLeft();
+  // "Під дату" shows as a fourth choice once a date is set, so a pace picked by the
+  // date is never a state where no button is lit.
+  const presets = Object.entries(PRESETS).map(([k, p]) => [k, p.label, p.newPerDay]);
+  if (left > 0) presets.push(["date", "Під дату", s.preset === "date" ? s.newPerDay : paceForDays(left).newPerDay]);
+  const theme = S.prefs.theme || "system";
   h(`
   ${topBar({ title: "Налаштування" })}
   <div class="stack">
+    ${syncSectionHtml()}
+
     <section class="card stack">
-      <h2>Скільки часу до іспиту</h2>
-      <div class="seg" role="radiogroup" aria-label="Темп підготовки">${Object.entries(PRESETS).map(([k, p]) =>
+      <h2>Іспит і темп</h2>
+      <label class="field"><span>Дата іспиту в сервісному центрі</span>
+        <input type="date" id="examDate" value="${S.plan.examDate || ""}"></label>
+      <div class="seg ${presets.length > 3 ? "four" : ""}" role="radiogroup" aria-label="Темп підготовки">${presets.map(([k, label, n]) =>
         `<button role="radio" aria-checked="${s.preset === k}" data-preset="${k}" class="${s.preset === k ? "on" : ""}">
-          ${p.label}<small>${p.newPerDay} на день</small></button>`).join("")}</div>
+          ${label}<small>${n} на день</small></button>`).join("")}</div>
       <p class="note" id="paceNote">${esc(paceNote(s))}</p>
       <details class="more" ${custom ? "open" : ""}>
         <summary>Додатково: параметри FSRS</summary>
@@ -1508,7 +1653,7 @@ function renderSettings() {
         <label class="field"><span>Максимальний інтервал, днів</span>
           <input type="number" inputmode="numeric" id="maxIvl" min="1" max="36500" value="${s.maxIvl}"></label>
         <p class="note">FSRS-6, як в Anki, зі стандартними параметрами. Кроки навчання: ${esc(s.steps.join(" "))},
-          повторне навчання: 10m. Зміни зберігаються одразу.</p>
+          повторне навчання: 10m. Утримуваність — яку частку вивченого алгоритм намагається тримати в пам'яті.</p>
       </details>
     </section>
 
@@ -1522,46 +1667,54 @@ function renderSettings() {
           <div id="pref-${k}"><b>${title}</b><p class="note">${note}</p></div>
           <button class="switch ${S.prefs[k] ? "on" : ""}" data-pref="${k}" role="switch" aria-checked="${S.prefs[k]}" aria-labelledby="pref-${k}"><span></span></button>
         </div>`).join("")}
+      <div class="field"><span id="themeLabel">Тема оформлення</span>
+        <div class="seg" role="radiogroup" aria-labelledby="themeLabel">${[["system", "Як у системі"], ["light", "Світла"], ["dark", "Темна"]].map(([k, label]) =>
+          `<button role="radio" aria-checked="${theme === k}" data-theme-pick="${k}" class="${theme === k ? "on" : ""}">${label}</button>`).join("")}</div>
+      </div>
     </section>
 
     <section class="card stack">
-      <h2>Іспит і нагадування</h2>
-      <label class="field"><span>Дата іспиту в сервісному центрі</span>
-        <input type="date" id="examDate" value="${S.plan.examDate || ""}"></label>
-      <label class="field"><span>Нагадування щодня о</span>
+      <h2>Нагадування</h2>
+      <label class="field"><span>Нагадувати щодня о</span>
         <input type="time" id="remindAt" value="${S.plan.remindAt || "19:00"}"></label>
       <button class="block" data-act="remind">📅 Додати нагадування в календар</button>
       <p class="note">Файл .ics для вашого календаря: щодня до дати іспиту, або 14 днів, якщо дату не вказано.</p>
     </section>
 
     <section class="card stack">
-      <h2>Офлайн</h2>
-      <p class="note">Збереже всі малюнки на пристрій (~30 МБ), щоб вчитися без інтернету. На телефоні додайте сайт на головний екран:
-        «Поділитися → На початковий екран» (iPhone) або меню браузера → «Встановити застосунок» (Android).</p>
-      <button class="block" data-act="offline" id="offlineBtn">Зберегти для офлайну</button>
-    </section>
-
-    ${syncSectionHtml()}
-    <section class="card stack">
-      <h2>Прогрес</h2>
-      <p class="note">${SYNC.on ? "Копія зберігається в цьому браузері й у хмарі. Без входу перенести прогрес можна"
+      <h2>Дані й офлайн</h2>
+      <p class="note">${SYNC.on ? "Ви увійшли — прогрес уже однаковий на всіх ваших пристроях. Без входу перенести його можна"
         : "Без входу прогрес зберігається лише в цьому браузері. Перенесіть його"} на телефон чи комп'ютер за QR-кодом
-        або посиланням — без реєстрації.</p>
-      <button class="primary block" data-act="transfer">📲 Перенести на інший пристрій</button>
+        або посиланням.</p>
+      <button class="${SYNC.on ? "" : "primary "}block" data-act="transfer">📲 Перенести на інший пристрій</button>
       <details class="more"><summary>Отримати прогрес з іншого пристрою</summary>
         <label class="field"><span>Вставте посилання для перенесення</span>
           <input type="url" id="xferIn" inputmode="url" autocomplete="off" placeholder="https://…#xfer=…"></label>
         <button class="block" data-act="xfer-in">Отримати прогрес</button>
       </details>
-      <p class="note">Або резервна копія файлом:</p>
-      <div class="actions two">
-        <button data-act="export">Експорт</button>
-        <label class="btn">Імпорт<input type="file" id="importFile" accept="application/json" hidden></label>
-      </div>
+      <details class="more"><summary>Резервна копія файлом</summary>
+        <div class="actions two">
+          <button data-act="export">Експорт</button>
+          <label class="btn">Імпорт<input type="file" id="importFile" accept="application/json" hidden></label>
+        </div>
+      </details>
+      <hr class="sep">
+      <p class="note">Збереже всі малюнки на пристрій (~30 МБ), щоб вчитися без інтернету. На телефоні додайте сайт на головний екран:
+        «Поділитися → На початковий екран» (iPhone) або меню браузера → «Встановити застосунок» (Android).</p>
+      <button class="block" data-act="offline" id="offlineBtn">Зберегти для офлайну</button>
+    </section>
+
+    <section class="card stack">
+      <h2>Довідка</h2>
+      <button class="block" data-act="tour">Як це працює</button>
+      <p class="note"><a href="privacy.html">Конфіденційність</a> · <a href="https://github.com/punjet/PDRAnkiDeck">GitHub</a></p>
+    </section>
+
+    <section class="card stack danger-zone">
+      <h2>Небезпечна зона</h2>
+      <p class="note">Видаляє прогрес, історію іспитів і помилки на цьому пристрої${SYNC.on ? " і в хмарі" : ""}. Скасувати не можна.</p>
       <button class="block text-bad" data-act="reset">Скинути весь прогрес</button>
     </section>
-    <button class="block" data-act="tour">Як це працює</button>
-    <footer><p><a href="privacy.html">Конфіденційність</a> · <a href="https://github.com/punjet/PDRAnkiDeck">GitHub</a></p></footer>
   </div>`);
   mountGoogle();
 }
@@ -1684,15 +1837,17 @@ function topicOrder(t) {
 const backOf = (v) => (v.name === "search" ? { name: "search" }
   : v.name === "topic" ? { name: "topic", id: v.id, back: v.back }
   : v.name === "result" ? { name: "result", exam: v.exam, rec: v.rec, celebrated: true }
+  : v.name === "question" ? { ...v }
   : { name: v.name });
 
 const secShort = (q) => q.sec.match(/^Розділ\s+(\d+(?:\.\d+)*)/)?.[1] || "";
 
-function questionRow(q, practiceKey) {
+// A tap on a question in a list opens it with its answer; practice is a button there.
+function questionRow(q) {
   const c = S.cards[q.id];
   const mark = S.wrong[q.id] ? `<i class="st bad" title="Є помилка"></i>`
     : c?.state === State.Review ? `<i class="st ok" title="Вивчено"></i>` : c ? `<i class="st warn" title="Вчите"></i>` : "";
-  return `<li><button class="sec" data-practice="${esc(practiceKey)}">
+  return `<li><button class="sec" data-q="${esc(q.id)}">
     <span class="sec-no">${esc(secShort(q))}</span>
     <span class="sec-name">${esc(clipText(q.t, 130))}<small>№${esc(q.num)}${q.img.length ? " · з малюнком" : ""}</small></span>${mark}
   </button></li>`;
@@ -1726,7 +1881,7 @@ function renderSearchResults() {
   const q = searchQuery.trim();
   if (!q) {
     searchHits = [];
-    box.innerHTML = DB.topics?.length ? browseHtml()
+    box.innerHTML = DB.topics?.length ? `<p class="muted small search-hint">Або оберіть тему:</p>${browseHtml()}`
       : `<p class="muted small search-hint">Шукайте за словами з питання або відповіді. Можна з помилками й російською.</p>`;
     return;
   }
@@ -1736,7 +1891,7 @@ function renderSearchResults() {
   box.innerHTML = `
     ${topics.length ? `<h2 class="res-h">Теми</h2><ol class="seclist">${topics.map(topicRow).join("")}</ol>` : ""}
     ${qs.length ? `<h2 class="res-h">Питання <span class="muted">${qs.length}</span></h2>
-      <ol class="seclist">${shown.map((x) => questionRow(x, x.id)).join("")}</ol>
+      <ol class="seclist">${shown.map((x) => questionRow(x)).join("")}</ol>
       ${qs.length > shown.length ? `<p class="muted small search-hint">Показано ${shown.length} з ${qs.length}. Уточніть запит.</p>` : ""}`
     : topics.length ? "" : `<div class="empty-state"><p class="emoji" aria-hidden="true">🔍</p><p class="muted">Нічого не знайдено. Спробуйте інше слово або коротшу форму: «обго», «розвор».</p></div>`}`;
   // Only how many results came back is logged, never the text typed.
@@ -1744,19 +1899,30 @@ function renderSearchResults() {
   searchLogTimer = setTimeout(() => ev("search", qs.length || topics.length ? "found" : "none", qs.length), 1500);
 }
 
-function browseHtml() {
+// Topics in their groups; each group says how much of it is learnt, so it is clear
+// where you have not been yet.
+function browseHtml(open = false) {
   const groups = [];
   for (const t of DB.topics) {
     let g = groups.find((x) => x.name === t.group);
-    if (!g) groups.push(g = { name: t.group, topics: [] });
+    if (!g) groups.push(g = { name: t.group, topics: [], known: 0, total: 0 });
     g.topics.push(t);
+    const p = topicProgress(t);
+    g.known += p.known; g.total += p.total;
   }
-  return `<p class="muted small search-hint">Або оберіть тему:</p>
-    ${groups.map((g) => `
-      <details class="group">
-        <summary>${esc(g.name)} <span class="muted">${g.topics.length}</span></summary>
+  return groups.map((g, i) => `
+      <details class="group" ${open && i === 0 ? "open" : ""}>
+        <summary>${esc(g.name)} <span class="muted small group-sub">${g.topics.length} ${plural(g.topics.length, "тема", "теми", "тем")}${
+          g.known ? ` · вивчено ${Math.round(100 * g.known / g.total)}%` : ""}</span></summary>
         <ol class="seclist">${g.topics.map(topicRow).join("")}</ol>
-      </details>`).join("")}`;
+      </details>`).join("");
+}
+
+function renderTopics() {
+  h(`
+  ${topBar({ title: "Теми", sub: "Тренуйте вибірково те, що потрібно" })}
+  <button class="search-bar" data-go="search">${ICON.search} Пошук питань і тем</button>
+  ${browseHtml(true)}`);
 }
 
 function renderTopic() {
@@ -1774,7 +1940,31 @@ function renderTopic() {
     <button class="primary block big" data-practice="all">Тренувати тему · ${p.total} ${plural(p.total, "питання", "питання", "питань")}</button>
     <p class="note">Спершу ваші помилки, потім нові. Розклад повторень не змінюється, а помилки потраплять у «Помилки».</p>
   </section>
-  <ol class="seclist topic-list">${ids.map((id) => questionRow(byId[id], id)).join("")}</ol>`);
+  <p class="legend st-legend"><span><i class="bad"></i>є помилка</span><span><i class="warn"></i>вчите</span><span><i class="ok"></i>вивчено</span></p>
+  <ol class="seclist topic-list">${ids.map((id) => questionRow(byId[id])).join("")}</ol>`);
+}
+
+// The list a question was opened from (a topic or search results) and its title.
+function listOf(v) {
+  return v.name === "topic"
+    ? { ids: topicOrder(topicById[v.id]), title: topicById[v.id].name }
+    : { ids: searchHits.map((x) => x.id), title: `Пошук: ${searchQuery}` };
+}
+
+// One question with its answer marked and the explanation, to look something up
+// without answering it (and without a stray tap counting as a mistake).
+function renderQuestion() {
+  const q = byId[view.id];
+  if (!q) return go(view.back || { name: "home" });
+  h(`
+  ${topBar({ back: 'data-act="back"', title: `Питання №${esc(q.num)}`, sub: esc(view.title) })}
+  <article class="card qcard">
+    ${questionHtml(q)}
+    ${optionsHtml(q, { reveal: true })}
+    <p class="verdict ok">Правильна відповідь — ${q.a + 1}.</p>
+    ${explainHtml(q, null)}
+  </article>
+  ${dock(`<button class="primary block big" data-practice="">Тренувати з цього питання</button>`)}`);
 }
 
 function renderPractice() {
@@ -1825,9 +2015,13 @@ app.addEventListener("click", async (e) => {
   if (t.dataset.jump !== undefined) return examGoto(Number(t.dataset.jump));
   if (t.dataset.rate !== undefined) return doRate(Number(t.dataset.rate));
   if (t.dataset.preset) {
-    const p = PRESETS[t.dataset.preset];
-    S.settings = { preset: t.dataset.preset, ...p };
+    const k = t.dataset.preset;
+    S.settings = k === "date" ? paceForDays(examDaysLeft()) : { preset: k, ...PRESETS[k] };
     save(); makeScheduler(); return render();
+  }
+  if (t.dataset.themePick) {
+    S.prefs.theme = t.dataset.themePick;
+    save(); applyTheme(); return render();
   }
   if (t.dataset.outcome) {
     S.tele.outcome = t.dataset.outcome;
@@ -1859,6 +2053,7 @@ app.addEventListener("click", async (e) => {
     return i === null ? finishExam() : examGoto(i);
   }
   if (act === "exam-finish") return finishExam();
+  if (act === "exam-start") return view.name === "exam" ? startExam() : go({ name: "exam", start: true });
   if (act === "exam-quit") {
     const ex = view.exam;
     if (!(await ask("Вийти з іспиту? Результат не буде зараховано.", { ok: "Вийти", cancel: "Продовжити іспит", danger: true }))) return;
@@ -1874,6 +2069,7 @@ app.addEventListener("click", async (e) => {
       device: device(), app_ver: APP_VER,
       abandoned: true, answered, quit_at: ex.i + 1, quit_qid: ex.ids[ex.i],
     });
+    clearExam();
     return go({ name: "home" });
   }
   if (act === "drill-next") return drillNext();
@@ -1881,7 +2077,7 @@ app.addEventListener("click", async (e) => {
   if (act === "reset") {
     if (await ask("Видалити весь прогрес, історію іспитів і помилки? Це не можна скасувати.", { ok: "Видалити все", danger: true })) {
       const keep = { tele: S.tele, plan: S.plan, ui: S.ui };
-      S = { ...defaultState(), ...keep, grade: grader.newModel(), firstSeen: Date.now() }; save(); makeScheduler(); applyMotion(); go({ name: "home" });
+      S = { ...defaultState(), ...keep, grade: grader.newModel(), firstSeen: Date.now() }; save(); makeScheduler(); applyMotion(); applyTheme(); go({ name: "home" });
       if (SYNC.on) syncNow();   // write the empty copy over the cloud one (no merge back)
     }
     return;
@@ -1893,12 +2089,19 @@ app.addEventListener("click", async (e) => {
     ev("train_topic", view.name);
     return go({ name: "practice", ids: topicOrder(tp), i: 0, results: {}, title: tp.name, back: backOf(view) });
   }
+  if (t.dataset.q) {
+    const { ids, title } = listOf(view);
+    return go({ name: "question", id: t.dataset.q, ids, title, back: backOf(view) });
+  }
   if (t.dataset.practice !== undefined) {
-    // From search results or a topic: practise that list, starting at the tapped question.
-    const ids = view.name === "topic" ? topicOrder(topicById[view.id]) : searchHits.map((x) => x.id);
-    const start = t.dataset.practice === "all" ? 0 : ids.indexOf(t.dataset.practice);
-    const title = view.name === "topic" ? topicById[view.id].name : `Пошук: ${searchQuery}`;
-    return go({ name: "practice", ids, i: Math.max(0, start), results: {}, title, back: backOf(view) });
+    // From a topic ("all") or a question opened from a list: practise that list,
+    // starting at that question.
+    if (view.name === "question") {
+      return go({ name: "practice", ids: view.ids, i: Math.max(0, view.ids.indexOf(view.id)), results: {},
+        title: view.title, back: view.back });
+    }
+    const { ids, title } = listOf(view);
+    return go({ name: "practice", ids, i: 0, results: {}, title, back: backOf(view) });
   }
   if (act === "back") return go(view.back || { name: "home" });
   if (act === "tour") return showTour("settings");
@@ -1995,6 +2198,19 @@ app.addEventListener("click", (e) => {
   ev("zoom", view.name);
 });
 
+// A question picture that cannot load (offline, pictures not saved) leaves a note
+// in its place instead of a broken image. "error" does not bubble: capture phase.
+app.addEventListener("error", (e) => {
+  const img = e.target;
+  if (!(img instanceof HTMLImageElement) || !img.matches(".qimg, .thumb")) return;
+  const box = img.closest(".zoomable") || img;
+  const note = document.createElement("p");
+  note.className = "img-missing small muted";
+  note.textContent = navigator.onLine ? "Малюнок не завантажився. Оновіть сторінку."
+    : "Малюнок недоступний офлайн. Збережіть малюнки: Налаштування → «Зберегти для офлайну».";
+  if (img.matches(".thumb")) img.remove(); else box.replaceWith(note);
+}, true);
+
 // Exam history: a tap (or Enter) on a bar names that attempt under the chart.
 function showExamBar(g) {
   const cap = document.getElementById("exhCap");
@@ -2033,7 +2249,8 @@ app.addEventListener("change", (e) => {
 function drillNext() {
   cancelAuto();
   const id = view.queue.shift();
-  if (view.state.chosen === byId[id].a) { delete S.wrong[id]; save(); }
+  view.tries++;
+  if (view.state.chosen === byId[id].a) { delete S.wrong[id]; view.fixed++; save(); }
   else view.queue.push(id);
   view.state = null;
   vt(render, "next");
@@ -2044,6 +2261,7 @@ function pickOption(i) {
     const ex = view.exam;
     if (ex.answers[ex.i] !== null) return;
     ex.answers[ex.i] = i;
+    saveExam(ex);
     const first = markActive(); save();
     trackAnswer(byId[ex.ids[ex.i]], "exam", i, activeNow() - ex.shownAt, null, null,
       { shuffled: isShuffled(ex.perms[ex.i]) });
@@ -2231,7 +2449,7 @@ function applyState(state) {
   normalize();
   for (const id of Object.keys(S.cards)) if (!byId[id]) delete S.cards[id];
   for (const id of Object.keys(S.wrong)) if (!byId[id]) delete S.wrong[id];
-  save(); makeScheduler(); applyMotion(); go({ name: "home" });
+  save(); makeScheduler(); applyMotion(); applyTheme(); go({ name: "home" });
 }
 
 // ---- sign-in with Google and sync between devices (sync.js, loaded on demand) ----
@@ -2309,7 +2527,7 @@ async function syncNow({ pull = false, manual = false } = {}) {
         S = { ...defaultState(), ...mergeStates(S, sanitizeState(remote.state)) };
         normalize();
         if (JSON.stringify(S) !== before) {
-          save(false); makeScheduler();
+          save(false); makeScheduler(); applyMotion(); applyTheme();
           if (["home", "settings"].includes(view.name)) render();
         }
       }
@@ -2377,7 +2595,8 @@ function syncSectionHtml() {
 function mountGoogle() {
   const el = document.getElementById("gsiBtn");
   if (!el || SYNC.on || !GOOGLE_SYNC) return;
-  const dark = matchMedia("(prefers-color-scheme: dark)").matches && document.documentElement.dataset.theme !== "light";
+  const theme = document.documentElement.dataset.theme;
+  const dark = theme === "dark" || (!theme && matchMedia("(prefers-color-scheme: dark)").matches);
   loadSync().then((sy) => sy.mountGoogleButton(el, {
     dark,
     onSignedIn: async (acc) => {
@@ -2525,13 +2744,16 @@ async function boot() {
   save();
   makeScheduler();
   applyMotion();
+  applyTheme();
   tele.init(() => S.tele.on);
   try {
     const r = await fetch("questions.json");
     if (!r.ok) throw new Error(r.status);
     DB = await r.json();
   } catch (e) {
-    app.innerHTML = `<p class="loading">Не вдалося завантажити питання. Перевірте інтернет і оновіть сторінку.</p>`;
+    app.innerHTML = `<div class="loading stack"><p>Не вдалося завантажити питання. Перевірте інтернет.</p>
+      <button class="primary" id="retryLoad">Спробувати знову</button></div>`;
+    document.getElementById("retryLoad").addEventListener("click", () => location.reload());
     return;
   }
   byId = Object.fromEntries(DB.questions.map((q) => [q.id, q]));
@@ -2543,7 +2765,12 @@ async function boot() {
   // Links from the topic pages: ?topic=t01 opens that topic.
   const topicParam = new URLSearchParams(location.search).get("topic");
   if (topicParam && topicById[topicParam]) view = { name: "topic", id: topicParam, back: { name: "home" } };
+  // An attempt cut short by a reload or a closed app goes on where it stopped.
+  const ex = loadExam();
+  if (ex) view = { name: "exam", exam: ex };
   render();
+  syncHistory();
+  if (ex && Date.now() < ex.endsAt) toast("Продовжуємо пробний іспит");
   startSession();
   // Sync must never stop the app from starting (offline, server down, old session).
   const fromSignIn = await startSync().catch(() => false);

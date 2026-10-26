@@ -79,8 +79,10 @@ export function toast(text) {
   el.setAttribute("role", "status");
   el.textContent = text;
   document.body.appendChild(el);
-  setTimeout(() => el.classList.add("out"), 2600);
-  setTimeout(() => el.remove(), 3100);
+  // Long lines stay longer: about 60 ms a character, 2.6 s at least.
+  const ms = Math.max(2600, text.length * 60);
+  setTimeout(() => el.classList.add("out"), ms);
+  setTimeout(() => el.remove(), ms + 500);
 }
 
 export function confetti() {
@@ -114,6 +116,7 @@ export function confetti() {
 
 // In-page confirm: native confirm() is a grey system box on phones and blocks the timer.
 // Resolves true for the confirm button, false for cancel, Esc or a tap outside.
+// A dangerous action starts with focus on cancel, so a stray Enter does no harm.
 // note: an optional plain-text explanation under the question.
 export function ask(text, { ok = "Так", cancel = "Скасувати", danger = false, note = "" } = {}) {
   if (typeof HTMLDialogElement !== "function") return Promise.resolve(confirm(text));
@@ -136,7 +139,7 @@ export function ask(text, { ok = "Так", cancel = "Скасувати", danger
     d.addEventListener("close", () => { resolve(d.returnValue === "ok"); d.remove(); });
     document.body.appendChild(d);
     d.showModal();
-    d.querySelector("button").focus();
+    d.querySelector(danger ? 'button[value=""]' : "button").focus();
   });
 }
 
